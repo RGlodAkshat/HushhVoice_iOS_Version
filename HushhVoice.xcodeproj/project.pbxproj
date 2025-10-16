@@ -8,17 +8,38 @@
 
 /* Begin PBXBuildFile section */
 		C6535D552EA0B08C00837A7C /* HushhVoiceApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D542EA0B08C00837A7C /* HushhVoiceApp.swift */; };
-		C6535D572EA0B08C00837A7C /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D562EA0B08C00837A7C /* ContentView.swift */; };
 		C6535D592EA0B08D00837A7C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C6535D582EA0B08D00837A7C /* Assets.xcassets */; };
 		C6535D5C2EA0B08D00837A7C /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C6535D5B2EA0B08D00837A7C /* Preview Assets.xcassets */; };
+		C6535D642EA0B35600837A7C /* OpenAIKit in Frameworks */ = {isa = PBXBuildFile; productRef = C6535D632EA0B35600837A7C /* OpenAIKit */; };
+		C6535D662EA0B6B400837A7C /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D652EA0B6B400837A7C /* Models.swift */; };
+		C6535D682EA0B6F800837A7C /* HushhAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D672EA0B6F800837A7C /* HushhAPI.swift */; };
+		C6535D6A2EA0B72200837A7C /* GoogleSignInManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D692EA0B72200837A7C /* GoogleSignInManager.swift */; };
+		C6535D6C2EA0B75000837A7C /* ChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D6B2EA0B75000837A7C /* ChatStore.swift */; };
+		C6535D6E2EA0B76C00837A7C /* MessageRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D6D2EA0B76C00837A7C /* MessageRow.swift */; };
+		C6535D702EA0B7A500837A7C /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D6F2EA0B7A500837A7C /* ChatView.swift */; };
+		C6535D722EA0BB1100837A7C /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D712EA0BB1100837A7C /* Theme.swift */; };
+		C6535D742EA0BB7C00837A7C /* TypingIndicatorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D732EA0BB7C00837A7C /* TypingIndicatorView.swift */; };
+		C6535D762EA0BB9E00837A7C /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D752EA0BB9E00837A7C /* ComposerView.swift */; };
+		C6535D782EA0CFB200837A7C /* HeaderBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D772EA0CFB200837A7C /* HeaderBar.swift */; };
+		C6535D7A2EA0D06900837A7C /* AutoGrowingTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6535D792EA0D06900837A7C /* AutoGrowingTextView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		C6535D512EA0B08C00837A7C /* HushhVoice.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HushhVoice.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C6535D542EA0B08C00837A7C /* HushhVoiceApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HushhVoiceApp.swift; sourceTree = "<group>"; };
-		C6535D562EA0B08C00837A7C /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		C6535D582EA0B08D00837A7C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C6535D5B2EA0B08D00837A7C /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		C6535D652EA0B6B400837A7C /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		C6535D672EA0B6F800837A7C /* HushhAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HushhAPI.swift; sourceTree = "<group>"; };
+		C6535D692EA0B72200837A7C /* GoogleSignInManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleSignInManager.swift; sourceTree = "<group>"; };
+		C6535D6B2EA0B75000837A7C /* ChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStore.swift; sourceTree = "<group>"; };
+		C6535D6D2EA0B76C00837A7C /* MessageRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRow.swift; sourceTree = "<group>"; };
+		C6535D6F2EA0B7A500837A7C /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		C6535D712EA0BB1100837A7C /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		C6535D732EA0BB7C00837A7C /* TypingIndicatorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypingIndicatorView.swift; sourceTree = "<group>"; };
+		C6535D752EA0BB9E00837A7C /* ComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerView.swift; sourceTree = "<group>"; };
+		C6535D772EA0CFB200837A7C /* HeaderBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeaderBar.swift; sourceTree = "<group>"; };
+		C6535D792EA0D06900837A7C /* AutoGrowingTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoGrowingTextView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -26,6 +47,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C6535D642EA0B35600837A7C /* OpenAIKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -52,7 +74,17 @@
 			isa = PBXGroup;
 			children = (
 				C6535D542EA0B08C00837A7C /* HushhVoiceApp.swift */,
-				C6535D562EA0B08C00837A7C /* ContentView.swift */,
+				C6535D652EA0B6B400837A7C /* Models.swift */,
+				C6535D672EA0B6F800837A7C /* HushhAPI.swift */,
+				C6535D6D2EA0B76C00837A7C /* MessageRow.swift */,
+				C6535D732EA0BB7C00837A7C /* TypingIndicatorView.swift */,
+				C6535D692EA0B72200837A7C /* GoogleSignInManager.swift */,
+				C6535D6B2EA0B75000837A7C /* ChatStore.swift */,
+				C6535D772EA0CFB200837A7C /* HeaderBar.swift */,
+				C6535D712EA0BB1100837A7C /* Theme.swift */,
+				C6535D792EA0D06900837A7C /* AutoGrowingTextView.swift */,
+				C6535D752EA0BB9E00837A7C /* ComposerView.swift */,
+				C6535D6F2EA0B7A500837A7C /* ChatView.swift */,
 				C6535D582EA0B08D00837A7C /* Assets.xcassets */,
 				C6535D5A2EA0B08D00837A7C /* Preview Content */,
 			);
@@ -83,6 +115,9 @@
 			dependencies = (
 			);
 			name = HushhVoice;
+			packageProductDependencies = (
+				C6535D632EA0B35600837A7C /* OpenAIKit */,
+			);
 			productName = HushhVoice;
 			productReference = C6535D512EA0B08C00837A7C /* HushhVoice.app */;
 			productType = "com.apple.product-type.application";
@@ -111,6 +146,9 @@
 				Base,
 			);
 			mainGroup = C6535D482EA0B08C00837A7C;
+			packageReferences = (
+				C6535D622EA0B35600837A7C /* XCRemoteSwiftPackageReference "OpenAIKit" */,
+			);
 			productRefGroup = C6535D522EA0B08C00837A7C /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -137,8 +175,18 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C6535D572EA0B08C00837A7C /* ContentView.swift in Sources */,
+				C6535D762EA0BB9E00837A7C /* ComposerView.swift in Sources */,
+				C6535D742EA0BB7C00837A7C /* TypingIndicatorView.swift in Sources */,
+				C6535D7A2EA0D06900837A7C /* AutoGrowingTextView.swift in Sources */,
+				C6535D662EA0B6B400837A7C /* Models.swift in Sources */,
+				C6535D722EA0BB1100837A7C /* Theme.swift in Sources */,
+				C6535D6C2EA0B75000837A7C /* ChatStore.swift in Sources */,
+				C6535D6A2EA0B72200837A7C /* GoogleSignInManager.swift in Sources */,
+				C6535D702EA0B7A500837A7C /* ChatView.swift in Sources */,
+				C6535D782EA0CFB200837A7C /* HeaderBar.swift in Sources */,
+				C6535D6E2EA0B76C00837A7C /* MessageRow.swift in Sources */,
 				C6535D552EA0B08C00837A7C /* HushhVoiceApp.swift in Sources */,
+				C6535D682EA0B6F800837A7C /* HushhAPI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -342,6 +390,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		C6535D622EA0B35600837A7C /* XCRemoteSwiftPackageReference "OpenAIKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/MarcoDotIO/OpenAIKit";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.0.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		C6535D632EA0B35600837A7C /* OpenAIKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6535D622EA0B35600837A7C /* XCRemoteSwiftPackageReference "OpenAIKit" */;
+			productName = OpenAIKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = C6535D492EA0B08C00837A7C /* Project object */;
 }
