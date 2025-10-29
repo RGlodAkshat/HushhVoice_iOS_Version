@@ -2,7 +2,8 @@
 //  HushhVoiceApp.swift
 //  HushhVoice
 //
-//  Created by Akshat Kumar on 26/10/25.
+//  Entry point that boots the Chat UI.
+//  Keep this file tiny so iteration stays fast.
 //
 
 import SwiftUI
@@ -11,7 +12,8 @@ import SwiftUI
 struct HushhVoiceApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ChatView() // Main experience
+                .preferredColorScheme(.dark)
         }
     }
 }
