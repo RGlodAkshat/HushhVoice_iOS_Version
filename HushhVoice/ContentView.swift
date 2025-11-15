@@ -2,46 +2,35 @@
 //  ContentView.swift
 //  HushhVoice
 //
-//  Overlay sidebar + scrim, safer left padding in sidebar,
-//  compact single-line composer (no auto-growing) + mic button,
-//  assistant message actions (copy / speak UI / reload answer),
-//  Google Sign-In/Out in header, and empty-state placeholders.
-//
-//  Kept:
-//  - Multi-chat sidebar (titles + timestamps, active highlight)
-//  - New Chat, Delete, Rename with local persistence (UserDefaults)
-//  - Modern chat UI: bubbles, shadows, smooth auto-scroll, animations
-//  - Composer with Send button intact (unchanged behavior)
-//  - Settings placeholder
-//
-//  Notes:
-//  - Persists chats in UserDefaults ("chats_v2"). Migrates legacy single-thread messages ("chat_history_v1").
-//  - Titles derive from the first user message.
-//  - Sidebar slides OVER the chat with a dimmed scrim; chat does not shift or shrink.
-//
 
 import SwiftUI
 import Foundation
 import UIKit
 import AuthenticationServices
+import CryptoKit
 
 // ======================================================
 // MARK: - THEME
 // ======================================================
+
 enum HVTheme {
     static let bg = Color.black
     static let surface = Color(white: 0.12)
     static let surfaceAlt = Color(white: 0.08)
     static let stroke = Color.white.opacity(0.08)
+
     static let userBubble = LinearGradient(
         colors: [Color.white.opacity(0.95), Color.white.opacity(0.80)],
-        startPoint: .topLeading, endPoint: .bottomTrailing
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
     )
+
     static let userText = Color.black
     static let botText = Color.white
-    static let corner: CGFloat = 16
 
+    static let corner: CGFloat = 16
     static let accent = Color(hue: 0.53, saturation: 0.55, brightness: 0.95)
+
     static let sidebarWidth: CGFloat = 280
     static let scrimOpacity: CGFloat = 0.40
 }
@@ -49,8 +38,10 @@ enum HVTheme {
 // ======================================================
 // MARK: - MODELS & DTOs
 // ======================================================
+
 struct Message: Identifiable, Codable, Equatable {
     enum Role: String, Codable { case user, assistant }
+
     let id: UUID
     let role: Role
     let text: String
@@ -71,9 +62,13 @@ struct Chat: Identifiable, Codable, Equatable {
     var updatedAt: Date
     var messages: [Message]
 
-    init(id: UUID = UUID(), title: String = "New Chat",
-         createdAt: Date = .init(), updatedAt: Date = .init(),
-         messages: [Message] = []) {
+    init(
+        id: UUID = UUID(),
+        title: String = "New Chat",
+        createdAt: Date = .init(),
+        updatedAt: Date = .init(),
+        messages: [Message] = []
+    ) {
         self.id = id
         self.title = title
         self.createdAt = createdAt
@@ -87,11 +82,13 @@ struct SiriAskResponse: Decodable {
     let data: SiriAskData?
     let error: SiriAskError?
 }
+
 struct SiriAskData: Decodable {
     let speech: String?
     let display: String?
     let open_url: String?
 }
+
 struct SiriAskError: Decodable {
     let message: String?
 }
@@ -99,9 +96,12 @@ struct SiriAskError: Decodable {
 // ======================================================
 // MARK: - API LAYER
 // ======================================================
+
 enum HushhAPI {
-    static let base = URL(string: "https://hushhvoice-1.onrender.com")!
-    static let appJWT = "Bearer dev-demo-app-jwt" // TODO: replace with real token
+    // Swap to prod when ready
+    static let base = URL(string: /*"https://1849ad2e3ce8.ngrok-free.app")!*/
+        "https://hushhvoice-1.onrender.com")!
+    static let appJWT = "Bearer dev-demo-app-jwt" // TODO: real token
 
     static func ask(prompt: String, googleToken: String?) async throws -> SiriAskData {
         var req = URLRequest(url: base.appendingPathComponent("/siri/ask"))
@@ -110,32 +110,47 @@ enum HushhAPI {
         req.setValue("founder@hushh.ai", forHTTPHeaderField: "X-User-Email")
 
         var tokens: [String: Any] = ["app_jwt": appJWT]
-        if let googleToken { tokens["google_access_token"] = googleToken }
+        if let googleToken {
+            tokens["google_access_token"] = googleToken
+        }
 
-        let body: [String: Any] = ["prompt": prompt, "tokens": tokens]
+        let body: [String: Any] = [
+            "prompt": prompt,
+            "tokens": tokens
+        ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard let http = resp as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
 
-        if !(200..<300).contains(http.statusCode) {
+        guard (200..<300).contains(http.statusCode) else {
             let decoded = try? JSONDecoder().decode(SiriAskResponse.self, from: data)
             let msg = decoded?.error?.message ?? "HTTP \(http.statusCode)"
-            throw NSError(domain: "HushhAPI", code: http.statusCode,
-                          userInfo: [NSLocalizedDescriptionKey: msg])
+            throw NSError(
+                domain: "HushhAPI",
+                code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: msg]
+            )
         }
+
         let result = try JSONDecoder().decode(SiriAskResponse.self, from: data)
         guard let data = result.data else {
-            throw NSError(domain: "HushhAPI", code: -1,
-                          userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
+            throw NSError(
+                domain: "HushhAPI",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid response"]
+            )
         }
         return data
     }
 }
 
 // ======================================================
-// MARK: - GOOGLE OAUTH
+// MARK: - GOOGLE OAUTH (PKCE flow)
 // ======================================================
+
 @MainActor
 final class GoogleSignInManager: NSObject, ObservableObject {
     static let shared = GoogleSignInManager()
@@ -143,8 +158,11 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     @Published var isSignedIn: Bool = false
     @Published var accessToken: String? = nil
 
-    private let clientID = "1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9.apps.googleusercontent.com"
-    private let redirectURI = "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9:/oauthredirect"
+    private let clientID =
+        "1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9.apps.googleusercontent.com"
+    private let redirectURI =
+        "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9:/oauthredirect"
+
     private let scopes = [
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/calendar.readonly",
@@ -152,43 +170,90 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     ].joined(separator: " ")
 
     private var session: ASWebAuthenticationSession?
+    private var codeVerifier: String?
+
+    // MARK: Persistence
 
     func loadFromDisk() {
         if let token = UserDefaults.standard.string(forKey: "google_access_token") {
-            self.accessToken = token
-            self.isSignedIn = true
+            accessToken = token
+            isSignedIn = true
         }
     }
 
+    func signOut() {
+        accessToken = nil
+        isSignedIn = false
+        UserDefaults.standard.removeObject(forKey: "google_access_token")
+    }
+
+    // MARK: Sign-In (Auth Code + PKCE)
+
     func signIn() {
         let state = UUID().uuidString
-        let url = URL(string:
+
+        let verifier = generateCodeVerifier()
+        codeVerifier = verifier
+        let challenge = codeChallenge(from: verifier)
+
+        let encodedScopes = scopes.addingPercentEncoding(
+            withAllowedCharacters: .urlQueryAllowed
+        ) ?? ""
+
+        let authURLString =
             "https://accounts.google.com/o/oauth2/v2/auth?" +
-            "response_type=token" +
+            "response_type=code" +
             "&client_id=\(clientID)" +
             "&redirect_uri=\(redirectURI)" +
-            "&scope=\(scopes.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)" +
-            "&state=\(state)"
-        )!
+            "&scope=\(encodedScopes)" +
+            "&state=\(state)" +
+            "&code_challenge=\(challenge)" +
+            "&code_challenge_method=S256"
+
+        guard let authURL = URL(string: authURLString) else {
+            print("Failed to build auth URL")
+            return
+        }
 
         let scheme = "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9"
 
-        session = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) { [weak self] callbackURL, error in
-            guard let self, error == nil, let callbackURL else {
-                print("Google sign-in failed: \(error?.localizedDescription ?? "unknown")")
+        session = ASWebAuthenticationSession(
+            url: authURL,
+            callbackURLScheme: scheme
+        ) { [weak self] callbackURL, error in
+            guard let self else { return }
+
+            if let error {
+                print("Google sign-in failed: \(error.localizedDescription)")
                 return
             }
-            guard let fragment = callbackURL.fragment else { return }
-            let pairs = fragment.split(separator: "&")
-            var map: [String: String] = [:]
-            for kv in pairs {
-                let parts = kv.split(separator: "=", maxSplits: 1).map(String.init)
-                if parts.count == 2 { map[parts[0]] = parts[1] }
+            guard let callbackURL else {
+                print("Google sign-in failed: missing callback URL")
+                return
             }
-            if let token = map["access_token"] {
-                self.accessToken = token
-                self.isSignedIn = true
-                UserDefaults.standard.set(token, forKey: "google_access_token")
+
+            guard
+                let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)
+            else {
+                print("Failed to parse callback URL components")
+                return
+            }
+
+            if let errorItem = components.queryItems?.first(where: { $0.name == "error" }),
+               let errorValue = errorItem.value {
+                print("Google auth error: \(errorValue)")
+                return
+            }
+
+            guard let codeItem = components.queryItems?.first(where: { $0.name == "code" }),
+                  let code = codeItem.value
+            else {
+                print("No auth code found in callback URL")
+                return
+            }
+
+            Task {
+                await self.exchangeCodeForToken(code: code)
             }
         }
 
@@ -196,10 +261,88 @@ final class GoogleSignInManager: NSObject, ObservableObject {
         session?.start()
     }
 
-    func signOut() {
-        accessToken = nil
-        isSignedIn = false
-        UserDefaults.standard.removeObject(forKey: "google_access_token")
+    private func exchangeCodeForToken(code: String) async {
+        guard let verifier = codeVerifier else {
+            print("Missing PKCE codeVerifier when exchanging token")
+            return
+        }
+
+        var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
+        request.httpMethod = "POST"
+
+        let bodyParams: [String: String] = [
+            "client_id": clientID,
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": redirectURI
+        ]
+
+        let bodyString = bodyParams
+            .map { key, value in
+                let escaped = value.addingPercentEncoding(
+                    withAllowedCharacters: .urlQueryAllowed
+                ) ?? ""
+                return "\(key)=\(escaped)"
+            }
+            .joined(separator: "&")
+
+        request.httpBody = bodyString.data(using: .utf8)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+
+            guard let http = response as? HTTPURLResponse else {
+                print("Token exchange: no HTTPURLResponse")
+                return
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let body = String(data: data, encoding: .utf8) ?? ""
+                print("Token exchange failed: \(http.statusCode) \(body)")
+                return
+            }
+
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let token = json?["access_token"] as? String
+
+            if let token {
+                accessToken = token
+                isSignedIn = true
+                UserDefaults.standard.set(token, forKey: "google_access_token")
+                print("Google access token stored (prefix): \(token.prefix(10))...")
+            } else {
+                print("Token exchange: no access_token in response JSON")
+            }
+        } catch {
+            print("Token exchange error: \(error)")
+        }
+    }
+
+    // MARK: PKCE helpers
+
+    private func generateCodeVerifier() -> String {
+        var data = Data(count: 32)
+        let result = data.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
+        }
+        if result != errSecSuccess {
+            return base64url(Data(UUID().uuidString.utf8))
+        }
+        return base64url(data)
+    }
+
+    private func codeChallenge(from verifier: String) -> String {
+        let data = Data(verifier.utf8)
+        let hashed = SHA256.hash(data: data)
+        return base64url(Data(hashed))
+    }
+
+    private func base64url(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }
 
@@ -215,6 +358,7 @@ extension GoogleSignInManager: ASWebAuthenticationPresentationContextProviding {
 // ======================================================
 // MARK: - STORE
 // ======================================================
+
 @MainActor
 final class ChatStore: ObservableObject {
     @Published private(set) var chats: [Chat] = []
@@ -226,6 +370,7 @@ final class ChatStore: ObservableObject {
     init() {
         load()
         migrateLegacyIfNeeded()
+
         if chats.isEmpty {
             let c = Chat()
             chats = [c]
@@ -240,12 +385,15 @@ final class ChatStore: ObservableObject {
         guard let id = activeChatID else { return nil }
         return chats.first(where: { $0.id == id })
     }
+
     var activeMessages: [Message] { activeChat?.messages ?? [] }
 
     func newChat(select: Bool = true) {
         let c = Chat()
         chats.insert(c, at: 0)
-        if select { activeChatID = c.id }
+        if select {
+            activeChatID = c.id
+        }
         save()
     }
 
@@ -254,14 +402,19 @@ final class ChatStore: ObservableObject {
     func deleteChat(_ chatID: UUID) {
         let wasActive = (activeChatID == chatID)
         chats.removeAll { $0.id == chatID }
-        if wasActive { activeChatID = chats.first?.id }
-        if chats.isEmpty { newChat(select: true) }
+        if wasActive {
+            activeChatID = chats.first?.id
+        }
+        if chats.isEmpty {
+            newChat(select: true)
+        }
         save()
     }
 
     func renameChat(_ chatID: UUID, to newTitle: String) {
         guard let idx = chats.firstIndex(where: { $0.id == chatID }) else { return }
-        chats[idx].title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled" : newTitle
+        let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        chats[idx].title = title.isEmpty ? "Untitled" : title
         chats[idx].updatedAt = Date()
         let updated = chats.remove(at: idx)
         chats.insert(updated, at: 0)
@@ -270,8 +423,12 @@ final class ChatStore: ObservableObject {
 
     func send(_ text: String, googleToken: String?) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let id = activeChatID, let idx = chats.firstIndex(where: { $0.id == id }) else { return }
+        guard !trimmed.isEmpty,
+              let id = activeChatID,
+              let idx = chats.firstIndex(where: { $0.id == id })
+        else { return }
 
+        // 1) Append the *user* message exactly as typed (for our local history)
         let userMsg = Message(role: .user, text: trimmed)
         chats[idx].messages.append(userMsg)
         chats[idx].updatedAt = Date()
@@ -281,9 +438,21 @@ final class ChatStore: ObservableObject {
         }
         save()
 
+        // 2) Build a context-aware prompt from recent history + this new turn
+        let contextualPrompt = buildContextualPrompt(
+            forChatIndex: idx,
+            newUserMessage: trimmed,
+            maxHistory: 10     // tweak window size as you like
+        )
+
+        // 3) Call backend with that context-aware prompt
         do {
-            let data = try await HushhAPI.ask(prompt: trimmed, googleToken: googleToken)
-            let replyText = (data.display?.removingPercentEncoding ?? data.display) ?? data.speech ?? "(no response)"
+            let data = try await HushhAPI.ask(prompt: contextualPrompt, googleToken: googleToken)
+            let replyText =
+                (data.display?.removingPercentEncoding ?? data.display)
+                ?? data.speech
+                ?? "(no response)"
+
             let botMsg = Message(role: .assistant, text: replyText)
             chats[idx].messages.append(botMsg)
             chats[idx].updatedAt = Date()
@@ -296,24 +465,29 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// Regenerate response *at a specific assistant message* using the nearest preceding user message.
+    /// Regenerate response at a specific assistant message using the nearest preceding user message.
     func regenerate(at assistantMessageID: UUID, googleToken: String?) async {
         guard let chatID = activeChatID,
               let chatIdx = chats.firstIndex(where: { $0.id == chatID }),
-              let aIdx = chats[chatIdx].messages.firstIndex(where: { $0.id == assistantMessageID && $0.role == .assistant })
+              let aIdx = chats[chatIdx].messages.firstIndex(where: {
+                  $0.id == assistantMessageID && $0.role == .assistant
+              })
         else { return }
 
         let msgs = chats[chatIdx].messages
         guard let userIdx = (0..<aIdx).last(where: { msgs[$0].role == .user }) else { return }
         let prompt = msgs[userIdx].text
 
-        // Remove the assistant answer we're reloading.
         chats[chatIdx].messages.remove(at: aIdx)
         save()
 
         do {
             let data = try await HushhAPI.ask(prompt: prompt, googleToken: googleToken)
-            let replyText = (data.display?.removingPercentEncoding ?? data.display) ?? data.speech ?? "(no response)"
+            let replyText =
+                (data.display?.removingPercentEncoding ?? data.display)
+                ?? data.speech
+                ?? "(no response)"
+
             let botMsg = Message(role: .assistant, text: replyText)
             chats[chatIdx].messages.insert(botMsg, at: aIdx)
             chats[chatIdx].updatedAt = Date()
@@ -327,18 +501,23 @@ final class ChatStore: ObservableObject {
     }
 
     func clearMessagesInActiveChat() {
-        guard let id = activeChatID, let idx = chats.firstIndex(where: { $0.id == id }) else { return }
+        guard let id = activeChatID,
+              let idx = chats.firstIndex(where: { $0.id == id })
+        else { return }
+
         chats[idx].messages.removeAll()
         chats[idx].updatedAt = Date()
         save()
     }
 
+    // MARK: Persistence helpers
+
     private func load() {
         if let raw = UserDefaults.standard.data(forKey: chatsKey) {
             do {
                 let decoded = try JSONDecoder().decode([Chat].self, from: raw)
-                self.chats = decoded
-                self.activeChatID = decoded.first?.id
+                chats = decoded
+                activeChatID = decoded.first?.id
             } catch {
                 print("Load chats_v2 failed: \(error)")
             }
@@ -360,6 +539,7 @@ final class ChatStore: ObservableObject {
               let decoded = try? JSONDecoder().decode([Message].self, from: raw),
               !decoded.isEmpty
         else { return }
+
         let migrated = Chat(title: "Migrated Chat", messages: decoded)
         chats = [migrated]
         activeChatID = migrated.id
@@ -367,19 +547,105 @@ final class ChatStore: ObservableObject {
         UserDefaults.standard.removeObject(forKey: legacySingleThreadKey)
     }
 
-    private static func initialWordsTitle(from text: String, maxWords: Int = 6, maxChars: Int = 42) -> String {
+    private func buildContextualPrompt(
+        forChatIndex idx: Int,
+        newUserMessage: String,
+        maxHistory: Int = 8
+    ) -> String {
+        // Take the last N messages before this new turn
+        let history = chats[idx].messages.suffix(maxHistory)
+
+        var convoLines: [String] = []
+        for m in history {
+            let prefix = (m.role == .user) ? "User" : "HushhVoice"
+            convoLines.append("\(prefix): \(m.text)")
+        }
+
+        let historyBlock = convoLines.joined(separator: "\n")
+
+        // Final prompt the backend will see
+        let prompt = """
+        You are HushhVoice, a private, consent-first AI copilot.
+        Continue the conversation based on the history below. Answer as HushhVoice.
+
+        Conversation so far:
+        \(historyBlock)
+
+        User: \(newUserMessage)
+        Assistant:
+        """
+
+        return prompt
+    }
+
+    private static func initialWordsTitle(
+        from text: String,
+        maxWords: Int = 6,
+        maxChars: Int = 42
+    ) -> String {
         let words = text.split(whereSeparator: { $0.isNewline || $0.isWhitespace })
         let first = words.prefix(maxWords).joined(separator: " ")
         let trimmed = first.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.count <= maxChars { return trimmed }
+        guard trimmed.count > maxChars else { return trimmed }
         let end = trimmed.index(trimmed.startIndex, offsetBy: maxChars)
         return String(trimmed[..<end]) + "…"
     }
 }
 
 // ======================================================
-// MARK: - HEADER (with Google Sign-In/Out)
+// MARK: - STREAMING MARKDOWN VIEW
 // ======================================================
+
+/// Renders markdown text and optionally "types" it out over time.
+struct StreamingMarkdownText: View {
+    let fullText: String
+    let animate: Bool
+    let charDelay: TimeInterval
+
+    @State private var visibleText: String = ""
+    @State private var started = false
+
+    var body: some View {
+        Group {
+            if #available(iOS 15.0, *) {
+                Text(attributedMarkdown(visibleText))
+            } else {
+                Text(visibleText)
+            }
+        }
+        .textSelection(.enabled)
+        .onAppear {
+            guard !started else { return }
+            started = true
+            if animate {
+                startTyping()
+            } else {
+                visibleText = fullText
+            }
+        }
+    }
+
+    private func startTyping() {
+        visibleText = ""
+        Task {
+            for ch in fullText {
+                try? await Task.sleep(nanoseconds: UInt64(charDelay * 1_000_000_000))
+                visibleText.append(ch)
+                if Task.isCancelled { break }
+            }
+        }
+    }
+
+    @available(iOS 15.0, *)
+    private func attributedMarkdown(_ text: String) -> AttributedString {
+        (try? AttributedString(markdown: text)) ?? AttributedString(text)
+    }
+}
+
+// ======================================================
+// MARK: - HEADER (Google Sign-In/Out)
+// ======================================================
+
 struct HeaderBar: View {
     var onToggleSidebar: (() -> Void)?
     @ObservedObject private var auth = GoogleSignInManager.shared
@@ -399,23 +665,18 @@ struct HeaderBar: View {
             Spacer()
 
             if auth.isSignedIn {
-                Button {
-                    auth.signOut()
-                } label: {
+                Button { auth.signOut() } label: {
                     Label("Sign Out", systemImage: "person.crop.circle.badge.minus")
-                        .labelStyle(.iconOnly)      // 👈 show only the icon
+                        .labelStyle(.iconOnly)
                 }
                 .tint(.white)
             } else {
-                Button {
-                    auth.signIn()
-                } label: {
+                Button { auth.signIn() } label: {
                     Label("Sign in with Google", systemImage: "person.crop.circle.badge.plus")
-                        .labelStyle(.iconOnly)      // 👈 show only the icon
+                        .labelStyle(.iconOnly)
                 }
                 .tint(.white)
             }
-
         }
         .padding(.horizontal)
         .padding(.top, 8)
@@ -425,14 +686,15 @@ struct HeaderBar: View {
 }
 
 // ======================================================
-// MARK: - MESSAGE BUBBLES (+ assistant actions)
+// MARK: - MESSAGE ROW (with assistant actions + streaming)
 // ======================================================
+
 struct MessageRow: View {
     let message: Message
     let isLastAssistant: Bool
     var onCopy: (() -> Void)?
-    var onSpeak: (() -> Void)?    // UI only
-    var onReload: (() -> Void)?   // regenerate this answer
+    var onSpeak: (() -> Void)?
+    var onReload: (() -> Void)?
 
     private var isUser: Bool { message.role == .user }
 
@@ -442,33 +704,43 @@ struct MessageRow: View {
                 if isUser { Spacer(minLength: 0) }
 
                 VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
-                    // Text(isUser ? "You" : "HushhVoice")
-                    //     .font(.caption2)
-                    //     .foregroundStyle(.white.opacity(0.6))
-
-                    Text(message.text)
-                        .textSelection(.enabled)
-                        .font(.body)
-                        .foregroundStyle(isUser ? HVTheme.userText : HVTheme.botText)
-                        .padding(.vertical, 10).padding(.horizontal, 12)
+                    messageBubble
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 12)
                         .background(
                             isUser
-                            ? AnyView(RoundedRectangle(cornerRadius: HVTheme.corner).fill(HVTheme.userBubble))
-                            : AnyView(RoundedRectangle(cornerRadius: HVTheme.corner).fill(HVTheme.surface))
+                            ? AnyView(
+                                RoundedRectangle(cornerRadius: HVTheme.corner)
+                                    .fill(HVTheme.userBubble)
+                            )
+                            : AnyView(
+                                RoundedRectangle(cornerRadius: HVTheme.corner)
+                                    .fill(HVTheme.surface)
+                            )
                         )
-                        .overlay(RoundedRectangle(cornerRadius: HVTheme.corner).stroke(HVTheme.stroke))
-                        .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 2)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: isUser ? .trailing : .leading).combined(with: .opacity),
-                            removal: .opacity
-                        ))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: HVTheme.corner)
+                                .stroke(HVTheme.stroke)
+                        )
+                        .shadow(
+                            color: .black.opacity(0.25),
+                            radius: 6,
+                            x: 0,
+                            y: 2
+                        )
+                        .transition(
+                            .asymmetric(
+                                insertion: .move(edge: isUser ? .trailing : .leading)
+                                    .combined(with: .opacity),
+                                removal: .opacity
+                            )
+                        )
                         .animation(.easeOut(duration: 0.18), value: message.id)
                 }
 
                 if !isUser { Spacer(minLength: 0) }
             }
 
-            // Assistant message actions row
             if !isUser {
                 HStack(spacing: 12) {
                     Button(action: { onCopy?() }) {
@@ -490,7 +762,9 @@ struct MessageRow: View {
                             .labelStyle(.iconOnly)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(isLastAssistant ? HVTheme.accent : .white.opacity(0.7))
+                    .foregroundStyle(
+                        isLastAssistant ? HVTheme.accent : .white.opacity(0.7)
+                    )
 
                     Spacer(minLength: 0)
                 }
@@ -502,25 +776,45 @@ struct MessageRow: View {
         }
         .padding(.horizontal)
     }
+
+    @ViewBuilder
+    private var messageBubble: some View {
+        if isUser {
+            Text(message.text)
+                .font(.body)
+                .foregroundStyle(HVTheme.userText)
+                .multilineTextAlignment(.trailing)
+        } else {
+            StreamingMarkdownText(
+                fullText: message.text,
+                animate: isLastAssistant,
+                charDelay: 0.01
+            )
+            .font(.body)
+            .foregroundStyle(HVTheme.botText)
+            .lineSpacing(4)                     // 👈 add breathing room between lines
+            .multilineTextAlignment(.leading)   // 👈 left-align blocks
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
 }
 
 // ======================================================
-// MARK: - COMPOSER (Single-line TextField + Mic button)
-//       (Send button left untouched per request)
+// MARK: - COMPOSER
 // ======================================================
+
 struct ComposerView: View {
     @Binding var text: String
     var isSending: Bool
     var disabled: Bool
     var onSend: () -> Void
 
-    private let fieldHeight: CGFloat = 36 // single-line
+    private let fieldHeight: CGFloat = 36
     private var iconSize: CGFloat { 20 }
 
     var body: some View {
         HStack(spacing: 8) {
-
-            // Microphone (UI only)
             Button(action: {}) {
                 Image(systemName: "mic.fill")
                     .font(.system(size: iconSize, weight: .semibold))
@@ -529,29 +823,39 @@ struct ComposerView: View {
             .background(Color.white.opacity(0.15))
             .foregroundStyle(.white)
             .clipShape(Circle())
-            .disabled(true) // UI only for now
+            .disabled(true) // placeholder for future mic
 
-            // Single-line input
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(HVTheme.surfaceAlt)
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
-                    .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 1)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(HVTheme.stroke)
+                    )
+                    .shadow(
+                        color: .black.opacity(0.25),
+                        radius: 4,
+                        x: 0,
+                        y: 1
+                    )
 
                 HStack {
-                    TextField("Ask HushhVoice…", text: $text, onCommit: { if !disabled { onSend() } })
-                        .textInputAutocapitalization(.sentences)
-                        .disableAutocorrection(false)
-                        .foregroundColor(.white)
-                        .font(.body)
-                        .frame(height: fieldHeight)
-                        .padding(.horizontal, 10)
+                    TextField(
+                        "Ask HushhVoice…",
+                        text: $text,
+                        onCommit: { if !disabled { onSend() } }
+                    )
+                    .textInputAutocapitalization(.sentences)
+                    .disableAutocorrection(false)
+                    .foregroundColor(.white)
+                    .font(.body)
+                    .frame(height: fieldHeight)
+                    .padding(.horizontal, 10)
                 }
                 .frame(height: fieldHeight)
             }
-            .frame(height: fieldHeight) // 👈 pin container height (fixes tall background)
+            .frame(height: fieldHeight)
 
-            // Send (unchanged)
             Button(action: onSend) {
                 if isSending {
                     ProgressView().tint(.black)
@@ -561,8 +865,12 @@ struct ComposerView: View {
                 }
             }
             .frame(width: fieldHeight, height: fieldHeight)
-            .background(disabled ? Color.white.opacity(0.25) : Color.white)
-            .foregroundStyle(disabled ? .black.opacity(0.5) : .black)
+            .background(
+                disabled ? Color.white.opacity(0.25) : Color.white
+            )
+            .foregroundStyle(
+                disabled ? .black.opacity(0.5) : .black
+            )
             .clipShape(Circle())
             .disabled(disabled)
         }
@@ -574,52 +882,83 @@ struct ComposerView: View {
 // ======================================================
 // MARK: - TYPING INDICATOR
 // ======================================================
+
 struct TypingIndicatorView: View {
     @State private var scale: CGFloat = 0.2
+
     var body: some View {
         HStack(spacing: 6) {
-            Circle().fill(.white.opacity(0.7)).frame(width: 7, height: 7).scaleEffect(scale)
-                .animation(.easeInOut(duration: 0.9).repeatForever().delay(0.00), value: scale)
-            Circle().fill(.white.opacity(0.85)).frame(width: 7, height: 7).scaleEffect(scale)
-                .animation(.easeInOut(duration: 0.9).repeatForever().delay(0.15), value: scale)
-            Circle().fill(.white).frame(width: 7, height: 7).scaleEffect(scale)
-                .animation(.easeInOut(duration: 0.9).repeatForever().delay(0.30), value: scale)
+            Circle()
+                .fill(.white.opacity(0.7))
+                .frame(width: 7, height: 7)
+                .scaleEffect(scale)
+                .animation(
+                    .easeInOut(duration: 0.9)
+                        .repeatForever()
+                        .delay(0.00),
+                    value: scale
+                )
+            Circle()
+                .fill(.white.opacity(0.85))
+                .frame(width: 7, height: 7)
+                .scaleEffect(scale)
+                .animation(
+                    .easeInOut(duration: 0.9)
+                        .repeatForever()
+                        .delay(0.15),
+                    value: scale
+                )
+            Circle()
+                .fill(.white)
+                .frame(width: 7, height: 7)
+                .scaleEffect(scale)
+                .animation(
+                    .easeInOut(duration: 0.9)
+                        .repeatForever()
+                        .delay(0.30),
+                    value: scale
+                )
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
-        .background(RoundedRectangle(cornerRadius: HVTheme.corner).fill(HVTheme.surface))
-        .overlay(RoundedRectangle(cornerRadius: HVTheme.corner).stroke(HVTheme.stroke))
+        .background(
+            RoundedRectangle(cornerRadius: HVTheme.corner)
+                .fill(HVTheme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: HVTheme.corner)
+                .stroke(HVTheme.stroke)
+        )
         .onAppear { scale = 1.0 }
     }
 }
 
 // ======================================================
-// MARK: - SIDEBAR (context menu: Rename + Delete)
+// MARK: - SIDEBAR
 // ======================================================
+
 struct ChatSidebar: View {
     @ObservedObject var store: ChatStore
     @Binding var showingSettings: Bool
     @Binding var isCollapsed: Bool
 
-    // Inline rename state
     @State private var renamingChatID: UUID?
     @State private var renameText: String = ""
 
-    // Optional small alert (iOS 17+) fallback
     @State private var showRenameAlert = false
     @State private var pendingRenameChatID: UUID?
     @State private var pendingRenameTitle: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header + New Chat
             HStack {
                 Text("Chats")
                     .font(.headline)
                     .foregroundColor(.white)
                 Spacer()
                 Button { store.newChat(select: true) } label: {
-                    Label("New", systemImage: "plus.circle.fill").labelStyle(.iconOnly)
+                    Label("New", systemImage: "plus.circle.fill")
+                        .labelStyle(.iconOnly)
                 }
                 .tint(HVTheme.accent)
             }
@@ -629,11 +968,11 @@ struct ChatSidebar: View {
 
             Divider().background(HVTheme.stroke)
 
-            // List
             ScrollView {
                 VStack(spacing: 6) {
                     ForEach(store.chats) { chat in
                         let isActive = (chat.id == store.activeChatID)
+
                         Button {
                             withAnimation(.easeInOut(duration: 0.18)) {
                                 store.selectChat(chat.id)
@@ -643,19 +982,27 @@ struct ChatSidebar: View {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: isActive ? "message.fill" : "message")
                                     .font(.system(size: 16, weight: .semibold))
-                                    .foregroundStyle(isActive ? HVTheme.accent : .white.opacity(0.7))
+                                    .foregroundStyle(
+                                        isActive ? HVTheme.accent : .white.opacity(0.7)
+                                    )
                                     .padding(.top, 2)
 
                                 VStack(alignment: .leading, spacing: 4) {
                                     if renamingChatID == chat.id {
-                                        TextField("Title", text: $renameText, onCommit: {
-                                            commitInlineRename(chat.id)
-                                        })
+                                        TextField(
+                                            "Title",
+                                            text: $renameText,
+                                            onCommit: { commitInlineRename(chat.id) }
+                                        )
                                         .textFieldStyle(.roundedBorder)
                                         .foregroundStyle(.white)
                                     } else {
                                         Text(chat.title.isEmpty ? "Untitled" : chat.title)
-                                            .font(.subheadline.weight(isActive ? .semibold : .regular))
+                                            .font(
+                                                .subheadline.weight(
+                                                    isActive ? .semibold : .regular
+                                                )
+                                            )
                                             .foregroundStyle(.white)
                                             .lineLimit(2)
                                     }
@@ -668,11 +1015,20 @@ struct ChatSidebar: View {
                             .padding(10)
                             .background(
                                 RoundedRectangle(cornerRadius: 12)
-                                    .fill(isActive ? Color.white.opacity(0.08) : Color.clear)
+                                    .fill(
+                                        isActive
+                                        ? Color.white.opacity(0.08)
+                                        : Color.clear
+                                    )
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 12)
-                                    .stroke(isActive ? HVTheme.accent.opacity(0.5) : HVTheme.stroke, lineWidth: isActive ? 1.5 : 1)
+                                    .stroke(
+                                        isActive
+                                        ? HVTheme.accent.opacity(0.5)
+                                        : HVTheme.stroke,
+                                        lineWidth: isActive ? 1.5 : 1
+                                    )
                             )
                         }
                         .contextMenu {
@@ -695,13 +1051,17 @@ struct ChatSidebar: View {
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
                                 store.deleteChat(chat.id)
-                            } label: { Label("Delete", systemImage: "trash") }
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
                         }
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
                             Button {
                                 renamingChatID = chat.id
                                 renameText = chat.title
-                            } label: { Label("Rename", systemImage: "pencil") }
+                            } label: {
+                                Label("Rename", systemImage: "pencil")
+                            }
                             .tint(HVTheme.accent)
                         }
                     }
@@ -713,7 +1073,6 @@ struct ChatSidebar: View {
 
             Spacer(minLength: 6)
 
-            // Settings
             Button { showingSettings = true } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "gearshape.fill")
@@ -724,8 +1083,12 @@ struct ChatSidebar: View {
                 .padding(10)
                 .frame(maxWidth: .infinity)
                 .background(
-                    RoundedRectangle(cornerRadius: 12).fill(HVTheme.surfaceAlt)
-                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(HVTheme.surfaceAlt)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(HVTheme.stroke)
+                        )
                 )
                 .padding([.horizontal, .bottom], 10)
             }
@@ -768,7 +1131,14 @@ fileprivate extension View {
         onSave: @escaping () -> Void,
         onCancel: @escaping () -> Void
     ) -> some View {
-        modifier(RenameAlertModifier(show: show, title: title, onSave: onSave, onCancel: onCancel))
+        modifier(
+            RenameAlertModifier(
+                show: show,
+                title: title,
+                onSave: onSave,
+                onCancel: onCancel
+            )
+        )
     }
 }
 
@@ -788,7 +1158,7 @@ fileprivate struct RenameAlertModifier: ViewModifier {
                 Text("Enter a new title.")
             }
         } else {
-            content // older iOS falls back to inline rename
+            content
         }
     }
 }
@@ -796,14 +1166,18 @@ fileprivate struct RenameAlertModifier: ViewModifier {
 // ======================================================
 // MARK: - SETTINGS PLACEHOLDER
 // ======================================================
+
 struct SettingsPlaceholderView: View {
     @Environment(\.dismiss) var dismiss
+
     var body: some View {
         NavigationStack {
             Form {
                 Section("General") {
-                    Toggle(isOn: .constant(true)) { Text("Dark Mode") }.disabled(true)
-                    Toggle(isOn: .constant(true)) { Text("Hushh Backend") }.disabled(true)
+                    Toggle(isOn: .constant(true)) { Text("Dark Mode") }
+                        .disabled(true)
+                    Toggle(isOn: .constant(true)) { Text("Hushh Backend") }
+                        .disabled(true)
                 }
                 Section("About") {
                     Text("Version 0.1 (MVP)")
@@ -821,9 +1195,9 @@ struct SettingsPlaceholderView: View {
 }
 
 // ======================================================
-// MARK: - CHAT VIEW (overlay sidebar; chat unchanged size)
-//       + Empty state placeholders
+// MARK: - CHAT VIEW (overlay sidebar; empty state)
 // ======================================================
+
 struct ChatView: View {
     @StateObject private var store = ChatStore()
     @ObservedObject var auth = GoogleSignInManager.shared
@@ -834,7 +1208,6 @@ struct ChatView: View {
     @State private var showSidebar: Bool = false
     @State private var showingSettings = false
 
-    // Empty state phrases (rotated when chat is empty)
     private let emptyPhrases = [
         "Hi, I'm HushhVoice. How may I help you?",
         "Ready when you are — ask me anything.",
@@ -846,9 +1219,12 @@ struct ChatView: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            // Base conversation (not resized by sidebar)
             VStack(spacing: 0) {
-                HeaderBar(onToggleSidebar: { withAnimation(.easeInOut(duration: 0.22)) { showSidebar.toggle() } })
+                HeaderBar {
+                    withAnimation(.easeInOut(duration: 0.22)) {
+                        showSidebar.toggle()
+                    }
+                }
 
                 ScrollViewReader { proxy in
                     ZStack {
@@ -859,13 +1235,19 @@ struct ChatView: View {
                                         message: msg,
                                         isLastAssistant: isLastAssistant(msg),
                                         onCopy: { UIPasteboard.general.string = msg.text },
-                                        onSpeak: { /* UI only */ },
+                                        onSpeak: { /* reserved for TTS hook */ },
                                         onReload: {
-                                            Task { await store.regenerate(at: msg.id, googleToken: auth.accessToken) }
+                                            Task {
+                                                await store.regenerate(
+                                                    at: msg.id,
+                                                    googleToken: auth.accessToken
+                                                )
+                                            }
                                         }
                                     )
                                     .id(msg.id)
                                 }
+
                                 if showTyping {
                                     TypingIndicatorView().id("typing")
                                 }
@@ -873,20 +1255,22 @@ struct ChatView: View {
                             .padding(.vertical, 12)
                         }
 
-                        // Empty-state placeholder
                         if store.activeMessages.isEmpty {
                             VStack(spacing: 10) {
                                 Text(currentEmptyPhrase)
                                     .font(.title3.weight(.semibold))
                                     .foregroundStyle(.white.opacity(0.9))
+
                                 Rectangle()
                                     .fill(.white.opacity(0.06))
                                     .frame(width: 220, height: 8)
                                     .cornerRadius(4)
+
                                 Rectangle()
                                     .fill(.white.opacity(0.06))
                                     .frame(width: 260, height: 8)
                                     .cornerRadius(4)
+
                                 Rectangle()
                                     .fill(.white.opacity(0.06))
                                     .frame(width: 180, height: 8)
@@ -894,14 +1278,24 @@ struct ChatView: View {
                             }
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 24)
-                            .transition(.opacity.combined(with: .scale))
+                            .transition(
+                                .opacity.combined(with: .scale)
+                            )
                         }
                     }
                     .onChange(of: store.activeMessages.last?.id) { _, id in
-                        if let id { withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(id, anchor: .bottom) } }
+                        if let id {
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                proxy.scrollTo(id, anchor: .bottom)
+                            }
+                        }
                     }
                     .onChange(of: showTyping) { _, typing in
-                        if typing { withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo("typing", anchor: .bottom) } }
+                        if typing {
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                proxy.scrollTo("typing", anchor: .bottom)
+                            }
+                        }
                     }
                 }
 
@@ -920,29 +1314,42 @@ struct ChatView: View {
             }
             .background(HVTheme.bg.ignoresSafeArea())
 
-            // SCRIM + SIDEBAR (overlay)
             if showSidebar {
                 Color.black
                     .opacity(HVTheme.scrimOpacity)
                     .ignoresSafeArea()
                     .transition(.opacity)
-                    .onTapGesture { withAnimation(.easeInOut(duration: 0.22)) { showSidebar = false } }
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            showSidebar = false
+                        }
+                    }
 
-                ChatSidebar(store: store, showingSettings: $showingSettings, isCollapsed: $showSidebar)
-                    .frame(width: HVTheme.sidebarWidth)
-                    .transition(.move(edge: .leading).combined(with: .opacity))
+                ChatSidebar(
+                    store: store,
+                    showingSettings: $showingSettings,
+                    isCollapsed: $showSidebar
+                )
+                .frame(width: HVTheme.sidebarWidth)
+                .transition(.move(edge: .leading).combined(with: .opacity))
             }
         }
         .tint(HVTheme.accent)
-        .sheet(isPresented: $showingSettings) { SettingsPlaceholderView() }
+        .sheet(isPresented: $showingSettings) {
+            SettingsPlaceholderView()
+        }
         .task { auth.loadFromDisk() }
         .onAppear { randomizeEmptyPhrase() }
-        .onChange(of: store.activeChatID) { _ in randomizeEmptyPhrase() }
+        .onChange(of: store.activeChatID) { _ in
+            randomizeEmptyPhrase()
+        }
     }
 
     private func isLastAssistant(_ msg: Message) -> Bool {
         guard msg.role == .assistant else { return false }
-        guard let last = store.activeMessages.last(where: { $0.role == .assistant }) else { return false }
+        guard let last = store.activeMessages.last(where: { $0.role == .assistant }) else {
+            return false
+        }
         return last.id == msg.id
     }
 
@@ -953,11 +1360,14 @@ struct ChatView: View {
     private func send() async {
         let q = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
+
         sending = true
         input = ""
         showTyping = true
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+
         await store.send(q, googleToken: auth.accessToken)
+
         showTyping = false
         sending = false
     }
@@ -968,6 +1378,7 @@ struct ChatView: View {
 // ======================================================
 // MARK: - Legacy (disabled)
 // ======================================================
+
 #if false
 import OpenAIKit
 import Combine
