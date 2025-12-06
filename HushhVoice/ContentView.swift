@@ -24,16 +24,17 @@ enum HVTheme {
 
     static var isDark: Bool { _isDark }
 
+    // Dark mode: keep your original values
     static var bg: Color {
-        isDark ? Color.black : Color.white
+        isDark ? Color.black : Color(white: 0.985)
     }
 
     static var surface: Color {
-        isDark ? Color(white: 0.12) : Color(white: 0.92)
+        isDark ? Color(white: 0.12) : Color.white
     }
 
     static var surfaceAlt: Color {
-        isDark ? Color(white: 0.08) : Color(white: 0.96)
+        isDark ? Color(white: 0.08) : Color(white: 0.94)
     }
 
     static var stroke: Color {
@@ -49,7 +50,7 @@ enum HVTheme {
             )
         } else {
             return LinearGradient(
-                colors: [Color(white: 0.95), Color(white: 0.90)],
+                colors: [Color.white, Color(white: 0.96)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -57,10 +58,15 @@ enum HVTheme {
     }
 
     static var userText: Color { .black }
-    static var botText: Color { isDark ? .white : .black }
+    static var botText: Color { isDark ? .white : Color(red: 0.12, green: 0.14, blue: 0.20) }
 
+    // Dark keeps your original bluish accent, light gets a teal/mint accent
     static var accent: Color {
-        Color(hue: 0.53, saturation: 0.55, brightness: isDark ? 0.95 : 0.70)
+        if isDark {
+            return Color(hue: 0.53, saturation: 0.55, brightness: 0.95)
+        } else {
+            return Color(red: 0.00, green: 0.55, blue: 0.43)
+        }
     }
 
     static let corner: CGFloat = 16
@@ -227,6 +233,7 @@ enum HushhAPI {
         return data   // MP3 bytes
     }
 }
+
 // ======================================================
 // MARK: - GOOGLE OAUTH (PKCE flow + REFRESH)
 // ======================================================
@@ -246,7 +253,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     private let refreshTokenKey = "google_refresh_token"
     private let expiryKey = "google_token_expiry"
 
-    // MARK: App Group storage (shared with Siri)
+    // MARK: App Group storage (shared with Siri / AppIntents)
 
     // Must match the App Group you created in the Dev portal + Xcode
     private let appGroupID = "group.ai.hushh.hushhvoice"
@@ -257,7 +264,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
 
     // MARK: OAuth config (iOS client)
 
-    // ✅ Keep using your existing iOS client id / redirect URI
+    // Keep using your existing iOS client id / redirect URI
     private let clientID =
         "1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9.apps.googleusercontent.com"
     private let redirectURI =
@@ -323,21 +330,29 @@ final class GoogleSignInManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: Ensure valid token (used by app + Siri)
+    // MARK: Ensure valid token (used by app + Siri/AppIntents)
 
     /// Ensures we have a non-expired access token.
     /// Returns the current valid token, or nil if refresh/sign-in is required.
     func ensureValidAccessToken() async -> String? {
+        // When called from Siri/AppIntents, we might not have run loadFromDisk() yet.
+        if accessToken == nil && defaults.string(forKey: tokenKey) != nil {
+            print("🔵 ensureValidAccessToken: loading from disk for this process")
+            loadFromDisk()
+        }
+
         // 1) Try cached token that hasn't expired
         if let expiry = tokenExpiryDate,
            expiry > Date(),
            let token = accessToken ?? defaults.string(forKey: tokenKey) {
             isSignedIn = true
+            print("🔵 ensureValidAccessToken: using cached token (prefix \(token.prefix(8)))")
             return token
         }
 
         // 2) Try using the refresh token
         guard let refreshToken = storedRefreshToken else {
+            print("🔴 ensureValidAccessToken: no refresh token stored")
             accessToken = nil
             isSignedIn = false
             return nil
@@ -436,7 +451,6 @@ final class GoogleSignInManager: NSObject, ObservableObject {
             return
         }
 
-        // Must match redirect scheme before the colon
         let scheme = "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9"
 
         session = ASWebAuthenticationSession(
@@ -1009,7 +1023,7 @@ struct HeaderBar: View {
 
             Text("HushhVoice")
                 .font(.headline)
-                .foregroundStyle(.white)
+                .foregroundStyle(HVTheme.botText)
 
             Spacer()
         }
@@ -1088,7 +1102,9 @@ struct MessageRow: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.9))
+                .foregroundStyle(
+                    HVTheme.isDark ? Color.white.opacity(0.9) : HVTheme.accent
+                )
             }
             .padding(.horizontal)
         }
@@ -1145,7 +1161,9 @@ struct MessageRow: View {
                             .labelStyle(.iconOnly)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(
+                        HVTheme.isDark ? Color.white.opacity(0.9) : HVTheme.accent
+                    )
 
                     Button(action: { onSpeakToggle?() }) {
                         if isLoadingTTS {
@@ -1161,7 +1179,9 @@ struct MessageRow: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(
-                        isSpeaking ? HVTheme.accent : .white.opacity(0.9)
+                        isSpeaking
+                        ? HVTheme.accent
+                        : (HVTheme.isDark ? Color.white.opacity(0.9) : HVTheme.botText)
                     )
 
                     Button(action: { onReload?() }) {
@@ -1170,7 +1190,7 @@ struct MessageRow: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(
-                        isLastAssistant ? HVTheme.accent : .white.opacity(0.7)
+                        isLastAssistant ? HVTheme.accent : HVTheme.botText.opacity(0.7)
                     )
 
                     Spacer(minLength: 0)
@@ -1263,7 +1283,7 @@ struct TypingIndicatorView: View {
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(.white.opacity(0.7))
+                .fill(HVTheme.botText.opacity(0.35))
                 .frame(width: 7, height: 7)
                 .scaleEffect(scale)
                 .animation(
@@ -1273,7 +1293,7 @@ struct TypingIndicatorView: View {
                     value: scale
                 )
             Circle()
-                .fill(.white.opacity(0.85))
+                .fill(HVTheme.botText.opacity(0.55))
                 .frame(width: 7, height: 7)
                 .scaleEffect(scale)
                 .animation(
@@ -1283,7 +1303,7 @@ struct TypingIndicatorView: View {
                     value: scale
                 )
             Circle()
-                .fill(.white)
+                .fill(HVTheme.botText)
                 .frame(width: 7, height: 7)
                 .scaleEffect(scale)
                 .animation(
@@ -1328,7 +1348,7 @@ struct ChatSidebar: View {
             HStack {
                 Text("Chats")
                     .font(.headline)
-                    .foregroundColor(.white)
+                    .foregroundColor(HVTheme.botText)
                 Spacer()
                 Button { store.newChat(select: true) } label: {
                     Label("New", systemImage: "plus.circle.fill")
@@ -1357,7 +1377,7 @@ struct ChatSidebar: View {
                                 Image(systemName: isActive ? "message.fill" : "message")
                                     .font(.system(size: 16, weight: .semibold))
                                     .foregroundStyle(
-                                        isActive ? HVTheme.accent : .white.opacity(0.7)
+                                        isActive ? HVTheme.accent : HVTheme.botText.opacity(0.7)
                                     )
                                     .padding(.top, 2)
 
@@ -1369,7 +1389,7 @@ struct ChatSidebar: View {
                                             onCommit: { commitInlineRename(chat.id) }
                                         )
                                         .textFieldStyle(.roundedBorder)
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(HVTheme.botText)
                                     } else {
                                         Text(chat.title.isEmpty ? "Untitled" : chat.title)
                                             .font(
@@ -1377,12 +1397,12 @@ struct ChatSidebar: View {
                                                     isActive ? .semibold : .regular
                                                 )
                                             )
-                                            .foregroundStyle(.white)
+                                            .foregroundStyle(HVTheme.botText)
                                             .lineLimit(2)
                                     }
                                     Text(chat.updatedAt, style: .time)
                                         .font(.caption2)
-                                        .foregroundStyle(.white.opacity(0.5))
+                                        .foregroundStyle(HVTheme.botText.opacity(0.5))
                                 }
                                 Spacer()
                             }
@@ -1391,7 +1411,9 @@ struct ChatSidebar: View {
                                 RoundedRectangle(cornerRadius: 12)
                                     .fill(
                                         isActive
-                                        ? Color.white.opacity(0.08)
+                                        ? (HVTheme.isDark
+                                            ? Color.white.opacity(0.08)
+                                            : Color.white)
                                         : Color.clear
                                     )
                             )
@@ -1453,7 +1475,7 @@ struct ChatSidebar: View {
                         .font(.system(size: 16, weight: .semibold))
                     Text("Settings").font(.subheadline)
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(HVTheme.botText)
                 .padding(10)
                 .frame(maxWidth: .infinity)
                 .background(
@@ -1470,7 +1492,12 @@ struct ChatSidebar: View {
         }
         .frame(width: HVTheme.sidebarWidth)
         .background(HVTheme.bg)
-        .shadow(color: .black.opacity(0.5), radius: 14, x: 0, y: 0)
+        .shadow(
+            color: HVTheme.isDark ? .black.opacity(0.5) : .black.opacity(0.12),
+            radius: HVTheme.isDark ? 14 : 6,
+            x: 0,
+            y: 0
+        )
         .transition(.move(edge: .leading).combined(with: .opacity))
         .ifAvailableiOS17RenameAlert(
             show: $showRenameAlert,
@@ -1589,7 +1616,6 @@ struct OnboardingView: View {
                         }
                         .font(.subheadline)
                     }
-
 
                     Group {
                         Text("Email & Calendar")
@@ -1962,20 +1988,20 @@ struct ChatView: View {
                             VStack(spacing: 10) {
                                 Text(currentEmptyPhrase)
                                     .font(.title3.weight(.semibold))
-                                    .foregroundStyle(.white.opacity(0.9))
+                                    .foregroundStyle(HVTheme.botText.opacity(0.9))
 
                                 Rectangle()
-                                    .fill(.white.opacity(0.06))
+                                    .fill(HVTheme.botText.opacity(0.06))
                                     .frame(width: 220, height: 8)
                                     .cornerRadius(4)
 
                                 Rectangle()
-                                    .fill(.white.opacity(0.06))
+                                    .fill(HVTheme.botText.opacity(0.06))
                                     .frame(width: 260, height: 8)
                                     .cornerRadius(4)
 
                                 Rectangle()
-                                    .fill(.white.opacity(0.06))
+                                    .fill(HVTheme.botText.opacity(0.06))
                                     .frame(width: 180, height: 8)
                                     .cornerRadius(4)
                             }
@@ -2149,6 +2175,8 @@ struct AskHushhVoiceIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let token = await GoogleSignInManager.shared.ensureValidAccessToken()
+        print("🔵 AskHushhVoiceIntent.perform: token is \(token == nil ? "nil" : "non-nil")")
+
         let data = try await HushhAPI.ask(
             prompt: question,
             googleToken: token
