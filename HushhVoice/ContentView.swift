@@ -16,23 +16,54 @@ import AppIntents
 // ======================================================
 
 enum HVTheme {
-    static let bg = Color.black
-    static let surface = Color(white: 0.12)
-    static let surfaceAlt = Color(white: 0.08)
-    static let stroke = Color.white.opacity(0.08)
+    private static var _isDark: Bool = true
 
-    static let userBubble = LinearGradient(
-        colors: [Color.white.opacity(0.95), Color.white.opacity(0.80)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    static func setMode(isDark: Bool) {
+        _isDark = isDark
+    }
 
-    static let userText = Color.black
-    static let botText = Color.white
+    static var isDark: Bool { _isDark }
+
+    static var bg: Color {
+        isDark ? Color.black : Color.white
+    }
+
+    static var surface: Color {
+        isDark ? Color(white: 0.12) : Color(white: 0.92)
+    }
+
+    static var surfaceAlt: Color {
+        isDark ? Color(white: 0.08) : Color(white: 0.96)
+    }
+
+    static var stroke: Color {
+        isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)
+    }
+
+    static var userBubble: LinearGradient {
+        if isDark {
+            return LinearGradient(
+                colors: [Color.white.opacity(0.95), Color.white.opacity(0.80)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        } else {
+            return LinearGradient(
+                colors: [Color(white: 0.95), Color(white: 0.90)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+
+    static var userText: Color { .black }
+    static var botText: Color { isDark ? .white : .black }
+
+    static var accent: Color {
+        Color(hue: 0.53, saturation: 0.55, brightness: isDark ? 0.95 : 0.70)
+    }
 
     static let corner: CGFloat = 16
-    static let accent = Color(hue: 0.53, saturation: 0.55, brightness: 0.95)
-
     static let sidebarWidth: CGFloat = 280
     static let scrimOpacity: CGFloat = 0.40
 }
@@ -196,7 +227,6 @@ enum HushhAPI {
         return data   // MP3 bytes
     }
 }
-
 // ======================================================
 // MARK: - GOOGLE OAUTH (PKCE flow + REFRESH)
 // ======================================================
@@ -205,21 +235,35 @@ enum HushhAPI {
 final class GoogleSignInManager: NSObject, ObservableObject {
     static let shared = GoogleSignInManager()
 
+    // MARK: Published state
+
     @Published var isSignedIn: Bool = false
     @Published var accessToken: String? = nil
 
-    // Stored in UserDefaults (for simplicity in this MVP).
-    // In a real app, refresh tokens should live in Keychain.
+    // MARK: Keys for storage
+
     private let tokenKey = "google_access_token"
     private let refreshTokenKey = "google_refresh_token"
     private let expiryKey = "google_token_expiry"
 
-    private let clientID =
-        "1042954531759-s0cgfui9ss2o2kvpvfss2o2k81gtjpop9.apps.googleusercontent.com"
-    private let redirectURI =
-        "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfss2o2k81gtjpop9:/oauthredirect"
+    // MARK: App Group storage (shared with Siri)
 
-    // ✅ Includes gmail.send & calendar.events
+    // Must match the App Group you created in the Dev portal + Xcode
+    private let appGroupID = "group.ai.hushh.hushhvoice"
+
+    private var defaults: UserDefaults {
+        UserDefaults(suiteName: appGroupID) ?? .standard
+    }
+
+    // MARK: OAuth config (iOS client)
+
+    // ✅ Keep using your existing iOS client id / redirect URI
+    private let clientID =
+        "1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9.apps.googleusercontent.com"
+    private let redirectURI =
+        "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9:/oauthredirect"
+
+    // Scopes we request from Google
     private let scopes = [
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.send",
@@ -227,13 +271,14 @@ final class GoogleSignInManager: NSObject, ObservableObject {
         "https://www.googleapis.com/auth/calendar.events"
     ].joined(separator: " ")
 
+    // MARK: PKCE + session
+
     private var session: ASWebAuthenticationSession?
     private var codeVerifier: String?
 
     // MARK: Persistence
 
     func loadFromDisk() {
-        let defaults = UserDefaults.standard
         if let token = defaults.string(forKey: tokenKey) {
             accessToken = token
             isSignedIn = true
@@ -245,28 +290,25 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     func signOut() {
         accessToken = nil
         isSignedIn = false
-        let defaults = UserDefaults.standard
         defaults.removeObject(forKey: tokenKey)
         defaults.removeObject(forKey: refreshTokenKey)
         defaults.removeObject(forKey: expiryKey)
     }
 
-    // MARK: Token helpers
-
     private var storedRefreshToken: String? {
-        UserDefaults.standard.string(forKey: refreshTokenKey)
+        defaults.string(forKey: refreshTokenKey)
     }
 
     private var tokenExpiryDate: Date? {
-        if let ts = UserDefaults.standard.double(forKey: expiryKey) as Double?,
-           ts > 0 {
-            return Date(timeIntervalSince1970: ts)
-        }
-        return nil
+        let ts = defaults.double(forKey: expiryKey)
+        return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
     }
 
-    private func saveTokens(accessToken: String, refreshToken: String?, expiresIn: TimeInterval?) {
-        let defaults = UserDefaults.standard
+    private func saveTokens(
+        accessToken: String,
+        refreshToken: String?,
+        expiresIn: TimeInterval?
+    ) {
         self.accessToken = accessToken
         defaults.set(accessToken, forKey: tokenKey)
 
@@ -275,25 +317,26 @@ final class GoogleSignInManager: NSObject, ObservableObject {
         }
 
         if let expiresIn {
-            let expiry = Date().addingTimeInterval(expiresIn - 30) // small safety buffer
+            // subtract 30s buffer
+            let expiry = Date().addingTimeInterval(expiresIn - 30)
             defaults.set(expiry.timeIntervalSince1970, forKey: expiryKey)
         }
     }
 
+    // MARK: Ensure valid token (used by app + Siri)
+
     /// Ensures we have a non-expired access token.
     /// Returns the current valid token, or nil if refresh/sign-in is required.
     func ensureValidAccessToken() async -> String? {
-        guard let _ = UserDefaults.standard.string(forKey: tokenKey) ?? accessToken else {
-            isSignedIn = false
-            return nil
-        }
-
-        if let expiry = tokenExpiryDate, expiry > Date(),
-           let token = accessToken ?? UserDefaults.standard.string(forKey: tokenKey) {
+        // 1) Try cached token that hasn't expired
+        if let expiry = tokenExpiryDate,
+           expiry > Date(),
+           let token = accessToken ?? defaults.string(forKey: tokenKey) {
             isSignedIn = true
             return token
         }
 
+        // 2) Try using the refresh token
         guard let refreshToken = storedRefreshToken else {
             accessToken = nil
             isSignedIn = false
@@ -393,7 +436,8 @@ final class GoogleSignInManager: NSObject, ObservableObject {
             return
         }
 
-        let scheme = "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfss2o2k81gtjpop9"
+        // Must match redirect scheme before the colon
+        let scheme = "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9"
 
         session = ASWebAuthenticationSession(
             url: authURL,
@@ -525,6 +569,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     }
 }
 
+// Presentation anchor for ASWebAuthenticationSession
 extension GoogleSignInManager: ASWebAuthenticationPresentationContextProviding {
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         UIApplication.shared.connectedScenes
@@ -535,7 +580,7 @@ extension GoogleSignInManager: ASWebAuthenticationPresentationContextProviding {
 }
 
 // ======================================================
-// MARK: - SPEECH MANAGER (Backend TTS + Stop + State)
+// MARK: - SPEECH MANAGER (TTS + Stop + State)
 // ======================================================
 
 final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate {
@@ -948,12 +993,11 @@ struct StreamingMarkdownText: View {
 }
 
 // ======================================================
-// MARK: - HEADER (Google Sign-In/Out)
+// MARK: - HEADER (clean)
 // ======================================================
 
 struct HeaderBar: View {
     var onToggleSidebar: (() -> Void)?
-    @ObservedObject private var auth = GoogleSignInManager.shared
 
     var body: some View {
         HStack(spacing: 12) {
@@ -968,20 +1012,6 @@ struct HeaderBar: View {
                 .foregroundStyle(.white)
 
             Spacer()
-
-            if auth.isSignedIn {
-                Button { auth.signOut() } label: {
-                    Label("Sign Out", systemImage: "person.crop.circle.badge.minus")
-                        .labelStyle(.iconOnly)
-                }
-                .tint(.white)
-            } else {
-                Button { auth.signIn() } label: {
-                    Label("Sign in with Google", systemImage: "person.crop.circle.badge.plus")
-                        .labelStyle(.iconOnly)
-                }
-                .tint(.white)
-            }
         }
         .padding(.horizontal)
         .padding(.top, 8)
@@ -992,9 +1022,6 @@ struct HeaderBar: View {
 
 // ======================================================
 // MARK: - MESSAGE ROW
-//   - Assistant: Copy / Speak (with loading + stop) / Reload
-//   - User:      Copy
-//   - Assistant controls hidden while text animates
 // ======================================================
 
 struct MessageRow: View {
@@ -1010,67 +1037,108 @@ struct MessageRow: View {
     private var isUser: Bool { message.role == .user }
 
     var body: some View {
-        VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
-            HStack(alignment: .bottom, spacing: 8) {
-                if isUser { Spacer(minLength: 0) }
+        if isUser {
+            userRow
+        } else {
+            assistantRow
+        }
+    }
 
-                VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
-                    messageBubble
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 12)
+    // User message row: bubble right + copy icon to its right
+    private var userRow: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+
+                Text(message.text)
+                    .font(.body)
+                    .foregroundStyle(HVTheme.userText)
+                    .multilineTextAlignment(.trailing)
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: HVTheme.corner)
+                            .fill(HVTheme.userBubble)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: HVTheme.corner)
+                            .stroke(HVTheme.stroke)
+                    )
+                    .shadow(
+                        color: .black.opacity(0.25),
+                        radius: 6,
+                        x: 0,
+                        y: 2
+                    )
+                    .transition(
+                        .asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .opacity
+                        )
+                    )
+                    .animation(.easeOut(duration: 0.18), value: message.id)
+
+                Button(action: { onCopy?() }) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 14, weight: .semibold))
+                        .padding(6)
                         .background(
-                            isUser
-                            ? AnyView(
-                                RoundedRectangle(cornerRadius: HVTheme.corner)
-                                    .fill(HVTheme.userBubble)
-                            )
-                            : AnyView(
-                                RoundedRectangle(cornerRadius: HVTheme.corner)
-                                    .fill(HVTheme.surface)
-                            )
+                            Circle()
+                                .fill(HVTheme.surfaceAlt)
                         )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: HVTheme.corner)
-                                .stroke(HVTheme.stroke)
-                        )
-                        .shadow(
-                            color: .black.opacity(0.25),
-                            radius: 6,
-                            x: 0,
-                            y: 2
-                        )
-                        .transition(
-                            .asymmetric(
-                                insertion: .move(edge: isUser ? .trailing : .leading)
-                                    .combined(with: .opacity),
-                                removal: .opacity
-                            )
-                        )
-                        .animation(.easeOut(duration: 0.18), value: message.id)
                 }
-
-                if !isUser { Spacer(minLength: 0) }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.9))
             }
+            .padding(.horizontal)
+        }
+    }
 
-            // Controls row
-            if isUser {
-                // User messages: only Copy
-                HStack(spacing: 12) {
-                    Button(action: { onCopy?() }) {
-                        Label("Copy", systemImage: "doc.on.doc")
-                            .labelStyle(.iconOnly)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white.opacity(0.9))
-
-                    Spacer(minLength: 0)
+    // Assistant row: bubble left + controls row (hidden while streaming)
+    private var assistantRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .bottom, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
+                    StreamingMarkdownText(
+                        fullText: message.text,
+                        animate: isLastAssistant,
+                        charDelay: 0.01
+                    )
+                    .font(.body)
+                    .foregroundStyle(HVTheme.botText)
+                    .lineSpacing(4)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: HVTheme.corner)
+                            .fill(HVTheme.surface)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: HVTheme.corner)
+                            .stroke(HVTheme.stroke)
+                    )
+                    .shadow(
+                        color: .black.opacity(0.25),
+                        radius: 6,
+                        x: 0,
+                        y: 2
+                    )
+                    .transition(
+                        .asymmetric(
+                            insertion: .move(edge: .leading).combined(with: .opacity),
+                            removal: .opacity
+                        )
+                    )
+                    .animation(.easeOut(duration: 0.18), value: message.id)
                 }
-                .font(.callout)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 4)
-                .opacity(0.9)
-            } else if !hideControls {
-                // Assistant messages: Copy / Speak / Reload
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal)
+
+            if !hideControls {
                 HStack(spacing: 12) {
                     Button(action: { onCopy?() }) {
                         Label("Copy", systemImage: "doc.on.doc")
@@ -1084,11 +1152,11 @@ struct MessageRow: View {
                             ProgressView()
                                 .scaleEffect(0.9)
                         } else if isSpeaking {
-                            Label("Stop", systemImage: "stop.fill")
-                                .labelStyle(.iconOnly)
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 15, weight: .semibold))
                         } else {
-                            Label("Speak", systemImage: "speaker.wave.2.fill")
-                                .labelStyle(.iconOnly)
+                            Image(systemName: "speaker.wave.2.fill")
+                                .font(.system(size: 15, weight: .semibold))
                         }
                     }
                     .buttonStyle(.plain)
@@ -1108,38 +1176,16 @@ struct MessageRow: View {
                     Spacer(minLength: 0)
                 }
                 .font(.callout)
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 20)
                 .padding(.vertical, 4)
                 .opacity(0.9)
             }
-        }
-        .padding(.horizontal)
-    }
-
-    @ViewBuilder
-    private var messageBubble: some View {
-        if isUser {
-            Text(message.text)
-                .font(.body)
-                .foregroundStyle(HVTheme.userText)
-                .multilineTextAlignment(.trailing)
-        } else {
-            StreamingMarkdownText(
-                fullText: message.text,
-                animate: isLastAssistant,
-                charDelay: 0.01
-            )
-            .font(.body)
-            .foregroundStyle(HVTheme.botText)
-            .lineSpacing(4)
-            .multilineTextAlignment(.leading)
-            .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
 
 // ======================================================
-// MARK: - COMPOSER (no mic, keyboard mic only)
+// MARK: - COMPOSER
 // ======================================================
 
 struct ComposerView: View {
@@ -1175,7 +1221,7 @@ struct ComposerView: View {
                     )
                     .textInputAutocapitalization(.sentences)
                     .disableAutocorrection(false)
-                    .foregroundColor(.white)
+                    .foregroundColor(HVTheme.botText)
                     .font(.body)
                     .frame(height: fieldHeight)
                     .padding(.horizontal, 10)
@@ -1492,27 +1538,87 @@ fileprivate struct RenameAlertModifier: ViewModifier {
 }
 
 // ======================================================
-// MARK: - SETTINGS PLACEHOLDER
+// MARK: - ONBOARDING / HOW-TO VIEW
 // ======================================================
 
-struct SettingsPlaceholderView: View {
+struct OnboardingView: View {
     @Environment(\.dismiss) var dismiss
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("General") {
-                    Toggle(isOn: .constant(true)) { Text("Dark Mode") }
-                        .disabled(true)
-                    Toggle(isOn: .constant(true)) { Text("Hushh Backend") }
-                        .disabled(true)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Welcome to HushhVoice")
+                            .font(.system(size: 28, weight: .bold))
+                        Text("Your private, consent-first AI copilot.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Group {
+                        Text("What you can do")
+                            .font(.headline)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Ask questions in natural language.", systemImage: "text.bubble")
+                            Label("Summarize or draft replies to your email.", systemImage: "envelope.badge")
+                            Label("Check your schedule or plan events.", systemImage: "calendar")
+                            Label("Use it like a smart, trustworthy assistant for your day.", systemImage: "brain.head.profile")
+                        }
+                        .font(.subheadline)
+                    }
+
+                    Group {
+                        Text("Using HushhVoice with Siri")
+                            .font(.headline)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("How it currently works:")
+                                .font(.subheadline)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("1. Say: “Hey Siri, ask HushhVoice…” and pause.")
+                                Text("2. Siri will respond: “What is the Question”")
+                                Text("3. Then say your request, like:")
+                                Text("   • “Check my email.”")
+                                Text("   • “What meetings do I have today?”")
+                                Text("   • “Draft a reply to my last email.”")
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        }
+                        .font(.subheadline)
+                    }
+
+
+                    Group {
+                        Text("Email & Calendar")
+                            .font(.headline)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Connect Google to let HushhVoice read and summarize your Gmail inbox.", systemImage: "envelope.open")
+                            Label("Ask natural questions like “Anything urgent from today?”", systemImage: "exclamationmark.circle")
+                            Label("Let it check your Google Calendar or help schedule meetings.", systemImage: "calendar.badge.clock")
+                        }
+                        .font(.subheadline)
+                    }
+
+                    Group {
+                        Text("Privacy & Consent")
+                            .font(.headline)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("HushhVoice uses your Google token only to talk to Gmail and Calendar on your behalf.")
+                            Text("You stay in control: you can disconnect at any time from Settings.")
+                            Text("Your data. Your business.")
+                        }
+                        .font(.subheadline)
+                    }
+
+                    Spacer(minLength: 8)
                 }
-                Section("About") {
-                    Text("Version 0.1 (MVP)")
-                    Text("Made with Aloha & Alpha 🫶")
-                }
+                .padding()
             }
-            .navigationTitle("Settings")
+            .navigationTitle("How to use HushhVoice")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
@@ -1523,9 +1629,235 @@ struct SettingsPlaceholderView: View {
 }
 
 // ======================================================
-// MARK: - CHAT VIEW
-//   - Tracks which assistant message is animating
-//   - Tracks SpeechManager for loading/stop UI
+// MARK: - SETTINGS VIEW (Sign out + Dark/Light + Help)
+// ======================================================
+
+struct SettingsView: View {
+    @Environment(\.dismiss) var dismiss
+    @Binding var isDarkMode: Bool
+    @ObservedObject var google: GoogleSignInManager
+
+    @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
+
+    @State private var showHelpSheet: Bool = false
+
+    var onSignOutAll: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Appearance") {
+                    Toggle(isOn: $isDarkMode) {
+                        Text("Dark Mode")
+                    }
+                }
+
+                Section("Accounts") {
+                    HStack {
+                        Text("Google")
+                        Spacer()
+                        Text(google.isSignedIn ? "Connected" : "Not Connected")
+                            .foregroundStyle(
+                                google.isSignedIn ? Color.green : .secondary
+                            )
+                            .font(.footnote)
+                    }
+
+                    Button {
+                        google.signIn()
+                    } label: {
+                        HStack {
+                            Image(systemName: "envelope.circle.fill")
+                            Text(google.isSignedIn ? "Reconnect Google" : "Sign in with Google")
+                        }
+                    }
+
+                    HStack {
+                        Text("Apple ID")
+                        Spacer()
+                        Text(appleUserID.isEmpty ? "Not Linked" : "Linked")
+                            .foregroundStyle(
+                                appleUserID.isEmpty ? .secondary : Color.green
+                            )
+                            .font(.footnote)
+                    }
+
+                    if appleUserID.isEmpty {
+                        SignInWithAppleButton(
+                            .continue,
+                            onRequest: { request in
+                                request.requestedScopes = [.fullName, .email]
+                            },
+                            onCompletion: handleAppleAuth
+                        )
+                        .signInWithAppleButtonStyle(.black)
+                        .frame(height: 40)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    } else {
+                        Button(role: .destructive) {
+                            appleUserID = ""
+                        } label: {
+                            Text("Unlink Apple ID")
+                        }
+                    }
+
+                    Button(role: .destructive) {
+                        onSignOutAll()
+                        dismiss()
+                    } label: {
+                        Text("Sign out of HushhVoice")
+                    }
+                }
+
+                Section("Help") {
+                    Button {
+                        showHelpSheet = true
+                    } label: {
+                        HStack {
+                            Image(systemName: "questionmark.circle")
+                            Text("How to use HushhVoice")
+                        }
+                    }
+                }
+
+                Section("About") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Hushh.ai")
+                            .font(.headline)
+                        Text("A private, consent-first AI copilot for your data, email, and calendar.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showHelpSheet) {
+                OnboardingView()
+            }
+        }
+    }
+
+    private func handleAppleAuth(_ result: Result<ASAuthorization, Error>) {
+        switch result {
+        case .success(let authResult):
+            if let credential = authResult.credential as? ASAuthorizationAppleIDCredential {
+                let userID = credential.user
+                appleUserID = userID
+            }
+        case .failure(let error):
+            print("Apple sign-in (Settings) failed: \(error)")
+        }
+    }
+}
+
+// ======================================================
+// MARK: - AUTH GATE (Google required OR Apple; both buttons visible)
+// ======================================================
+
+struct AuthGateView: View {
+    var onAppleSignedIn: (String) -> Void
+
+    @ObservedObject private var google = GoogleSignInManager.shared
+    @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            VStack(spacing: 8) {
+                Text("HushhVoice")
+                    .font(.system(size: 32, weight: .bold))
+                    .foregroundStyle(.white)
+
+                Text("Connect your account to start using your AI copilot.")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+            }
+
+            VStack(spacing: 16) {
+                Button {
+                    google.signIn()
+                } label: {
+                    HStack {
+                        Image(systemName: "envelope.circle.fill")
+                        Text(google.isSignedIn ? "Continue with Google" : "Sign in with Google")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.white)
+                    )
+                }
+                .foregroundColor(.black)
+
+                Text("or")
+                    .foregroundStyle(.white.opacity(0.6))
+                    .font(.footnote)
+
+                SignInWithAppleButton(
+                    .signIn,
+                    onRequest: { request in
+                        request.requestedScopes = [.fullName, .email]
+                    },
+                    onCompletion: handleAppleAuth
+                )
+                .signInWithAppleButtonStyle(.white)
+                .frame(height: 44)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+            .padding(.horizontal, 32)
+
+            Spacer()
+
+            VStack(spacing: 6) {
+                Text("Google is used for Gmail and Calendar access.")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                Text("Sign in with Apple is optional and lets you link your HushhVoice identity.")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 24)
+
+            Spacer(minLength: 30)
+        }
+        .background(
+            LinearGradient(
+                colors: [Color.black, Color(hue: 0.55, saturation: 0.5, brightness: 0.2)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+        )
+    }
+
+    private func handleAppleAuth(_ result: Result<ASAuthorization, Error>) {
+        switch result {
+        case .success(let authResult):
+            if let credential = authResult.credential as? ASAuthorizationAppleIDCredential {
+                let userID = credential.user
+                appleUserID = userID
+                onAppleSignedIn(userID)
+            }
+        case .failure(let error):
+            print("Apple sign-in failed: \(error)")
+        }
+    }
+}
+
+// ======================================================
+// MARK: - CHAT VIEW (root, with auth + theme + onboarding)
 // ======================================================
 
 struct ChatView: View {
@@ -1533,13 +1865,18 @@ struct ChatView: View {
     @ObservedObject var auth = GoogleSignInManager.shared
     @ObservedObject var speech = SpeechManager.shared
 
+    @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
+    @AppStorage("hushh_is_dark") private var isDarkMode: Bool = true
+    @AppStorage("hushh_has_seen_intro") private var hasSeenIntro: Bool = false
+
     @State private var input: String = ""
     @State private var sending = false
     @State private var showTyping = false
     @State private var showSidebar: Bool = false
     @State private var showingSettings = false
+    @State private var showingIntro = false
 
-    // ID of the assistant message currently "typing out"
+    // ID of the assistant message currently streaming
     @State private var animatingAssistantID: UUID?
 
     private let emptyPhrases = [
@@ -1551,7 +1888,32 @@ struct ChatView: View {
     ]
     @State private var currentEmptyPhrase: String = ""
 
+    private var isAuthenticated: Bool {
+        // Unlock the app if EITHER Google is signed in OR Apple ID is present.
+        return auth.isSignedIn || !appleUserID.isEmpty
+    }
+
     var body: some View {
+        Group {
+            if !isAuthenticated {
+                AuthGateView { newID in
+                    appleUserID = newID
+                }
+            } else {
+                mainChat
+            }
+        }
+        .preferredColorScheme(isDarkMode ? .dark : .light)
+        .onAppear {
+            HVTheme.setMode(isDark: isDarkMode)
+            auth.loadFromDisk()
+        }
+        .onChange(of: isDarkMode) { _, newValue in
+            HVTheme.setMode(isDark: newValue)
+        }
+    }
+
+    private var mainChat: some View {
         ZStack(alignment: .leading) {
             VStack(spacing: 0) {
                 HeaderBar {
@@ -1625,20 +1987,18 @@ struct ChatView: View {
                         }
                     }
                     .onChange(of: store.activeMessages.last?.id) { _, id in
-                        // Scroll to last message
                         if let id {
                             withAnimation(.easeOut(duration: 0.18)) {
                                 proxy.scrollTo(id, anchor: .bottom)
                             }
 
-                            // If last is assistant, mark it as animating so controls hide
                             if let last = store.activeMessages.last, last.role == .assistant {
                                 animatingAssistantID = id
                                 let textLength = last.text.count
-                                let total = Double(textLength) * 0.01 + 0.25
+                                let totalTime = Double(textLength) * 0.01 + 0.25
                                 Task {
                                     try? await Task.sleep(
-                                        nanoseconds: UInt64(total * 1_000_000_000)
+                                        nanoseconds: UInt64(totalTime * 1_000_000_000)
                                     )
                                     await MainActor.run {
                                         if animatingAssistantID == id {
@@ -1695,10 +2055,24 @@ struct ChatView: View {
         }
         .tint(HVTheme.accent)
         .sheet(isPresented: $showingSettings) {
-            SettingsPlaceholderView()
+            SettingsView(
+                isDarkMode: $isDarkMode,
+                google: auth,
+                onSignOutAll: handleSignOut
+            )
         }
-        .task { auth.loadFromDisk() }
-        .onAppear { randomizeEmptyPhrase() }
+        .sheet(isPresented: $showingIntro) {
+            OnboardingView()
+        }
+        .onAppear {
+            randomizeEmptyPhrase()
+            if !hasSeenIntro {
+                hasSeenIntro = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    showingIntro = true
+                }
+            }
+        }
         .onChange(of: store.activeChatID) { _ in
             randomizeEmptyPhrase()
         }
@@ -1733,13 +2107,18 @@ struct ChatView: View {
     }
 
     private func handleSpeakToggle(for msg: Message) {
-        // If this message is already speaking/loading, stop it.
         if speech.currentMessageID == msg.id && (speech.isPlaying || speech.isLoading) {
             speech.stop()
         } else {
-            // Start speaking this message
             speech.speak(msg.text, messageID: msg.id)
         }
+    }
+
+    private func handleSignOut() {
+        appleUserID = ""
+        auth.signOut()
+        speech.stop()
+        store.clearMessagesInActiveChat()
     }
 }
 
@@ -1762,7 +2141,6 @@ struct AskHushhVoiceIntent: AppIntent {
         Summary("Ask HushhVoice: \(\.$question)")
     }
 
-    // Optional: whether to bring the app to foreground
     static var openAppWhenRun: Bool = false
 
     static var suggestedInvocationPhrase: String {
