@@ -8,6 +8,8 @@ import Foundation
 import UIKit
 import AuthenticationServices
 import CryptoKit
+import AVFoundation
+import AppIntents
 
 // ======================================================
 // MARK: - THEME
@@ -99,9 +101,8 @@ struct SiriAskError: Decodable {
 
 enum HushhAPI {
     // Swap to prod when ready
-//    static let base = URL(string: "https://a6ee2db28da0.ngrok-free.app")!
-    static let base = URL(string: "https://hushhvoice-1.onrender.com")!
-    
+    static let base = URL(string: "https://5334cbb4e81e.ngrok-free.app")!
+    // static let base = URL(string: "https://hushhvoice-1.onrender.com")!
 
     static let appJWT = "Bearer dev-demo-app-jwt"
 
@@ -124,7 +125,6 @@ enum HushhAPI {
 
         let (data, resp) = try await URLSession.shared.data(for: req)
 
-        // 🔍 LOG RAW HTTP INFO
         if let http = resp as? HTTPURLResponse {
             print("🔵 /siri/ask status: \(http.statusCode)")
         } else {
@@ -153,7 +153,6 @@ enum HushhAPI {
 
         let result = try JSONDecoder().decode(SiriAskResponse.self, from: data)
 
-        // 🔍 LOG DECODED STRUCT TOO
         print("🧩 Decoded SiriAskResponse.ok = \(result.ok)")
         print("🧩 Decoded SiriAskResponse.data.display = \(result.data?.display ?? "nil")")
         print("🧩 Decoded SiriAskResponse.data.speech  = \(result.data?.speech ?? "nil")")
@@ -167,10 +166,39 @@ enum HushhAPI {
         }
         return data
     }
+
+    static func tts(text: String, voice: String? = nil) async throws -> Data {
+        var req = URLRequest(url: base.appendingPathComponent("/tts"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        var body: [String: Any] = ["text": text]
+        if let voice, !voice.isEmpty {
+            body["voice"] = voice
+        }
+
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+
+        guard let http = resp as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let msg = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+            throw NSError(
+                domain: "HushhAPI.TTS",
+                code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: msg]
+            )
+        }
+
+        return data   // MP3 bytes
+    }
 }
 
 // ======================================================
-// MARK: - GOOGLE OAUTH (PKCE flow)
+// MARK: - GOOGLE OAUTH (PKCE flow + REFRESH)
 // ======================================================
 
 @MainActor
@@ -180,13 +208,21 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     @Published var isSignedIn: Bool = false
     @Published var accessToken: String? = nil
 
-    private let clientID =
-        "1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9.apps.googleusercontent.com"
-    private let redirectURI =
-        "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9:/oauthredirect"
+    // Stored in UserDefaults (for simplicity in this MVP).
+    // In a real app, refresh tokens should live in Keychain.
+    private let tokenKey = "google_access_token"
+    private let refreshTokenKey = "google_refresh_token"
+    private let expiryKey = "google_token_expiry"
 
+    private let clientID =
+        "1042954531759-s0cgfui9ss2o2kvpvfss2o2k81gtjpop9.apps.googleusercontent.com"
+    private let redirectURI =
+        "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfss2o2k81gtjpop9:/oauthredirect"
+
+    // ✅ Includes gmail.send & calendar.events
     private let scopes = [
         "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
         "https://www.googleapis.com/auth/calendar.readonly",
         "https://www.googleapis.com/auth/calendar.events"
     ].joined(separator: " ")
@@ -197,16 +233,134 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     // MARK: Persistence
 
     func loadFromDisk() {
-        if let token = UserDefaults.standard.string(forKey: "google_access_token") {
+        let defaults = UserDefaults.standard
+        if let token = defaults.string(forKey: tokenKey) {
             accessToken = token
             isSignedIn = true
+        } else {
+            isSignedIn = false
         }
     }
 
     func signOut() {
         accessToken = nil
         isSignedIn = false
-        UserDefaults.standard.removeObject(forKey: "google_access_token")
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: tokenKey)
+        defaults.removeObject(forKey: refreshTokenKey)
+        defaults.removeObject(forKey: expiryKey)
+    }
+
+    // MARK: Token helpers
+
+    private var storedRefreshToken: String? {
+        UserDefaults.standard.string(forKey: refreshTokenKey)
+    }
+
+    private var tokenExpiryDate: Date? {
+        if let ts = UserDefaults.standard.double(forKey: expiryKey) as Double?,
+           ts > 0 {
+            return Date(timeIntervalSince1970: ts)
+        }
+        return nil
+    }
+
+    private func saveTokens(accessToken: String, refreshToken: String?, expiresIn: TimeInterval?) {
+        let defaults = UserDefaults.standard
+        self.accessToken = accessToken
+        defaults.set(accessToken, forKey: tokenKey)
+
+        if let rt = refreshToken, !rt.isEmpty {
+            defaults.set(rt, forKey: refreshTokenKey)
+        }
+
+        if let expiresIn {
+            let expiry = Date().addingTimeInterval(expiresIn - 30) // small safety buffer
+            defaults.set(expiry.timeIntervalSince1970, forKey: expiryKey)
+        }
+    }
+
+    /// Ensures we have a non-expired access token.
+    /// Returns the current valid token, or nil if refresh/sign-in is required.
+    func ensureValidAccessToken() async -> String? {
+        guard let _ = UserDefaults.standard.string(forKey: tokenKey) ?? accessToken else {
+            isSignedIn = false
+            return nil
+        }
+
+        if let expiry = tokenExpiryDate, expiry > Date(),
+           let token = accessToken ?? UserDefaults.standard.string(forKey: tokenKey) {
+            isSignedIn = true
+            return token
+        }
+
+        guard let refreshToken = storedRefreshToken else {
+            accessToken = nil
+            isSignedIn = false
+            return nil
+        }
+
+        do {
+            let newToken = try await refreshAccessToken(refreshToken: refreshToken)
+            isSignedIn = true
+            return newToken
+        } catch {
+            print("🔴 Token refresh failed: \(error)")
+            accessToken = nil
+            isSignedIn = false
+            return nil
+        }
+    }
+
+    private func refreshAccessToken(refreshToken: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
+        request.httpMethod = "POST"
+
+        let bodyParams: [String: String] = [
+            "client_id": clientID,
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken
+        ]
+
+        let bodyString = bodyParams
+            .map { key, value in
+                let escaped = value.addingPercentEncoding(
+                    withAllowedCharacters: .urlQueryAllowed
+                ) ?? ""
+                return "\(key)=\(escaped)"
+            }
+            .joined(separator: "&")
+
+        request.httpBody = bodyString.data(using: .utf8)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let http = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "GoogleAuth",
+                code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "Refresh failed: \(body)"]
+            )
+        }
+
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let token = json?["access_token"] as? String else {
+            throw NSError(
+                domain: "GoogleAuth",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "No access_token in refresh response"]
+            )
+        }
+        let expiresIn = json?["expires_in"] as? TimeInterval
+
+        saveTokens(accessToken: token, refreshToken: nil, expiresIn: expiresIn)
+        print("✅ Google access token refreshed (prefix): \(token.prefix(10))...")
+        return token
     }
 
     // MARK: Sign-In (Auth Code + PKCE)
@@ -229,6 +383,8 @@ final class GoogleSignInManager: NSObject, ObservableObject {
             "&redirect_uri=\(redirectURI)" +
             "&scope=\(encodedScopes)" +
             "&state=\(state)" +
+            "&access_type=offline" +
+            "&prompt=consent" +
             "&code_challenge=\(challenge)" +
             "&code_challenge_method=S256"
 
@@ -237,7 +393,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
             return
         }
 
-        let scheme = "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9"
+        let scheme = "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfss2o2k81gtjpop9"
 
         session = ASWebAuthenticationSession(
             url: authURL,
@@ -327,11 +483,12 @@ final class GoogleSignInManager: NSObject, ObservableObject {
 
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             let token = json?["access_token"] as? String
+            let refreshToken = json?["refresh_token"] as? String
+            let expiresIn = json?["expires_in"] as? TimeInterval
 
             if let token {
-                accessToken = token
+                saveTokens(accessToken: token, refreshToken: refreshToken, expiresIn: expiresIn)
                 isSignedIn = true
-                UserDefaults.standard.set(token, forKey: "google_access_token")
                 print("Google access token stored (prefix): \(token.prefix(10))...")
             } else {
                 print("Token exchange: no access_token in response JSON")
@@ -374,6 +531,120 @@ extension GoogleSignInManager: ASWebAuthenticationPresentationContextProviding {
             .compactMap { $0 as? UIWindowScene }
             .flatMap { $0.windows }
             .first { $0.isKeyWindow } ?? ASPresentationAnchor()
+    }
+}
+
+// ======================================================
+// MARK: - SPEECH MANAGER (Backend TTS + Stop + State)
+// ======================================================
+
+final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate {
+    static let shared = SpeechManager()
+
+    @Published var currentMessageID: UUID?
+    @Published var isLoading: Bool = false
+    @Published var isPlaying: Bool = false
+
+    private var player: AVAudioPlayer?
+    private let synth = AVSpeechSynthesizer()
+
+    override init() {
+        super.init()
+        synth.delegate = self
+    }
+
+    func speak(_ text: String, messageID: UUID?) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        Task { await speakAsync(trimmed, messageID: messageID) }
+    }
+
+    func stop() {
+        Task { await MainActor.run { self.stopAllInternal() } }
+    }
+
+    // MARK: Internal
+
+    private func speakAsync(_ text: String, messageID: UUID?) async {
+        await MainActor.run {
+            self.stopAllInternal()
+            self.currentMessageID = messageID
+            self.isLoading = true
+            self.isPlaying = false
+            self.configureAudioSession()
+        }
+
+        // 1) Try backend TTS
+        do {
+            let audioData = try await HushhAPI.tts(text: text, voice: "alloy")
+            try await MainActor.run {
+                self.player = try AVAudioPlayer(data: audioData)
+                self.player?.delegate = self
+                self.player?.prepareToPlay()
+                self.isLoading = false
+                self.isPlaying = true
+                self.player?.play()
+            }
+            return
+        } catch {
+            print("🔴 Backend TTS failed, falling back to system voice: \(error)")
+        }
+
+        // 2) Fallback to local AVSpeechSynthesizer
+        await MainActor.run {
+            self.isLoading = false
+            self.isPlaying = true
+            let utterance = AVSpeechUtterance(string: text)
+            if let betterVoice = AVSpeechSynthesisVoice(language: "en-US") {
+                utterance.voice = betterVoice
+            }
+            utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
+            self.synth.speak(utterance)
+        }
+    }
+
+    private func configureAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playback,
+                mode: .spokenAudio,
+                options: [.duckOthers]
+            )
+            try AVAudioSession.sharedInstance().setActive(true, options: [])
+        } catch {
+            print("AudioSession error: \(error)")
+        }
+    }
+
+    private func stopAllInternal() {
+        if let player, player.isPlaying {
+            player.stop()
+        }
+        if synth.isSpeaking {
+            synth.stopSpeaking(at: .immediate)
+        }
+
+        player = nil
+        isLoading = false
+        isPlaying = false
+        currentMessageID = nil
+
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: [])
+        } catch {
+            print("AudioSession deactivation error: \(error)")
+        }
+    }
+
+    // MARK: AVAudioPlayerDelegate / AVSpeechSynthesizerDelegate
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { await MainActor.run { self.stopAllInternal() } }
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        Task { await MainActor.run { self.stopAllInternal() } }
     }
 }
 
@@ -450,7 +721,6 @@ final class ChatStore: ObservableObject {
               let idx = chats.firstIndex(where: { $0.id == id })
         else { return }
 
-        // 1) Append the *user* message exactly as typed (for our local history)
         let userMsg = Message(role: .user, text: trimmed)
         chats[idx].messages.append(userMsg)
         chats[idx].updatedAt = Date()
@@ -460,14 +730,12 @@ final class ChatStore: ObservableObject {
         }
         save()
 
-        // 2) Build a context-aware prompt from recent history + this new turn
         let contextualPrompt = buildContextualPrompt(
             forChatIndex: idx,
             newUserMessage: trimmed,
-            maxHistory: 10     // tweak window size as you like
+            maxHistory: 10
         )
 
-        // 3) Call backend with that context-aware prompt
         do {
             let data = try await HushhAPI.ask(prompt: contextualPrompt, googleToken: googleToken)
             let replyText =
@@ -487,7 +755,6 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    /// Regenerate response at a specific assistant message using the nearest preceding user message.
     func regenerate(at assistantMessageID: UUID, googleToken: String?) async {
         guard let chatID = activeChatID,
               let chatIdx = chats.firstIndex(where: { $0.id == chatID }),
@@ -574,7 +841,6 @@ final class ChatStore: ObservableObject {
         newUserMessage: String,
         maxHistory: Int = 8
     ) -> String {
-        // Take the last N messages before this new turn
         let history = chats[idx].messages.suffix(maxHistory)
 
         var convoLines: [String] = []
@@ -585,7 +851,6 @@ final class ChatStore: ObservableObject {
 
         let historyBlock = convoLines.joined(separator: "\n")
 
-        // Final prompt the backend will see
         let prompt = """
         You are HushhVoice, a private, consent-first AI copilot.
         Continue the conversation based on the history below. Answer as HushhVoice.
@@ -617,6 +882,7 @@ final class ChatStore: ObservableObject {
 // ======================================================
 // MARK: - STREAMING MARKDOWN VIEW
 // ======================================================
+
 struct StreamingMarkdownText: View {
     let fullText: String
     let animate: Bool
@@ -639,8 +905,6 @@ struct StreamingMarkdownText: View {
             }
     }
 
-    // MARK: - Typing animation
-
     private func startTyping() {
         visibleText = ""
         Task {
@@ -654,13 +918,7 @@ struct StreamingMarkdownText: View {
         }
     }
 
-    // MARK: - Tiny markdown-ish renderer (only **bold**)
-
-    /// Very simple parser:
-    /// - Treats `**...**` as bold.
-    /// - Preserves all `\n` exactly (Text handles them correctly).
     private func renderedText(from text: String) -> Text {
-        // If there's no bold marker at all, keep it simple.
         guard text.contains("**") else {
             return Text(text)
         }
@@ -676,12 +934,10 @@ struct StreamingMarkdownText: View {
                 result = result + (isBold ? segment.bold() : segment)
             }
 
-            // Flip bold mode and skip past the `**`
             isBold.toggle()
             remaining = remaining[range.upperBound...]
         }
 
-        // Tail segment after the last `**`
         if !remaining.isEmpty {
             let segment = Text(String(remaining))
             result = result + (isBold ? segment.bold() : segment)
@@ -735,14 +991,20 @@ struct HeaderBar: View {
 }
 
 // ======================================================
-// MARK: - MESSAGE ROW (with assistant actions + streaming)
+// MARK: - MESSAGE ROW
+//   - Assistant: Copy / Speak (with loading + stop) / Reload
+//   - User:      Copy
+//   - Assistant controls hidden while text animates
 // ======================================================
 
 struct MessageRow: View {
     let message: Message
     let isLastAssistant: Bool
+    let hideControls: Bool
+    let isSpeaking: Bool
+    let isLoadingTTS: Bool
     var onCopy: (() -> Void)?
-    var onSpeak: (() -> Void)?
+    var onSpeakToggle: (() -> Void)?
     var onReload: (() -> Void)?
 
     private var isUser: Bool { message.role == .user }
@@ -790,7 +1052,9 @@ struct MessageRow: View {
                 if !isUser { Spacer(minLength: 0) }
             }
 
-            if !isUser {
+            // Controls row
+            if isUser {
+                // User messages: only Copy
                 HStack(spacing: 12) {
                     Button(action: { onCopy?() }) {
                         Label("Copy", systemImage: "doc.on.doc")
@@ -799,12 +1063,38 @@ struct MessageRow: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.white.opacity(0.9))
 
-                    Button(action: { onSpeak?() }) {
-                        Label("Speak", systemImage: "speaker.wave.2.fill")
+                    Spacer(minLength: 0)
+                }
+                .font(.callout)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .opacity(0.9)
+            } else if !hideControls {
+                // Assistant messages: Copy / Speak / Reload
+                HStack(spacing: 12) {
+                    Button(action: { onCopy?() }) {
+                        Label("Copy", systemImage: "doc.on.doc")
                             .labelStyle(.iconOnly)
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.white.opacity(0.9))
+
+                    Button(action: { onSpeakToggle?() }) {
+                        if isLoadingTTS {
+                            ProgressView()
+                                .scaleEffect(0.9)
+                        } else if isSpeaking {
+                            Label("Stop", systemImage: "stop.fill")
+                                .labelStyle(.iconOnly)
+                        } else {
+                            Label("Speak", systemImage: "speaker.wave.2.fill")
+                                .labelStyle(.iconOnly)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(
+                        isSpeaking ? HVTheme.accent : .white.opacity(0.9)
+                    )
 
                     Button(action: { onReload?() }) {
                         Label("Reload", systemImage: "arrow.clockwise")
@@ -841,16 +1131,15 @@ struct MessageRow: View {
             )
             .font(.body)
             .foregroundStyle(HVTheme.botText)
-            .lineSpacing(4)                     // 👈 add breathing room between lines
-            .multilineTextAlignment(.leading)   // 👈 left-align blocks
+            .lineSpacing(4)
+            .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)
         }
     }
-
 }
 
 // ======================================================
-// MARK: - COMPOSER
+// MARK: - COMPOSER (no mic, keyboard mic only)
 // ======================================================
 
 struct ComposerView: View {
@@ -864,16 +1153,6 @@ struct ComposerView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Button(action: {}) {
-                Image(systemName: "mic.fill")
-                    .font(.system(size: iconSize, weight: .semibold))
-                    .frame(width: fieldHeight, height: fieldHeight)
-            }
-            .background(Color.white.opacity(0.15))
-            .foregroundStyle(.white)
-            .clipShape(Circle())
-            .disabled(true) // placeholder for future mic
-
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
                     .fill(HVTheme.surfaceAlt)
@@ -1244,18 +1523,24 @@ struct SettingsPlaceholderView: View {
 }
 
 // ======================================================
-// MARK: - CHAT VIEW (overlay sidebar; empty state)
+// MARK: - CHAT VIEW
+//   - Tracks which assistant message is animating
+//   - Tracks SpeechManager for loading/stop UI
 // ======================================================
 
 struct ChatView: View {
     @StateObject private var store = ChatStore()
     @ObservedObject var auth = GoogleSignInManager.shared
+    @ObservedObject var speech = SpeechManager.shared
 
     @State private var input: String = ""
     @State private var sending = false
     @State private var showTyping = false
     @State private var showSidebar: Bool = false
     @State private var showingSettings = false
+
+    // ID of the assistant message currently "typing out"
+    @State private var animatingAssistantID: UUID?
 
     private let emptyPhrases = [
         "Hi, I'm HushhVoice. How may I help you?",
@@ -1280,16 +1565,23 @@ struct ChatView: View {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 12) {
                                 ForEach(store.activeMessages) { msg in
+                                    let isLast = isLastAssistant(msg)
+                                    let hideControls = (msg.role == .assistant && msg.id == animatingAssistantID)
+
                                     MessageRow(
                                         message: msg,
-                                        isLastAssistant: isLastAssistant(msg),
+                                        isLastAssistant: isLast,
+                                        hideControls: hideControls,
+                                        isSpeaking: speech.currentMessageID == msg.id && speech.isPlaying,
+                                        isLoadingTTS: speech.currentMessageID == msg.id && speech.isLoading,
                                         onCopy: { UIPasteboard.general.string = msg.text },
-                                        onSpeak: { /* reserved for TTS hook */ },
+                                        onSpeakToggle: { handleSpeakToggle(for: msg) },
                                         onReload: {
                                             Task {
+                                                let token = await auth.ensureValidAccessToken()
                                                 await store.regenerate(
                                                     at: msg.id,
-                                                    googleToken: auth.accessToken
+                                                    googleToken: token
                                                 )
                                             }
                                         }
@@ -1333,9 +1625,27 @@ struct ChatView: View {
                         }
                     }
                     .onChange(of: store.activeMessages.last?.id) { _, id in
+                        // Scroll to last message
                         if let id {
                             withAnimation(.easeOut(duration: 0.18)) {
                                 proxy.scrollTo(id, anchor: .bottom)
+                            }
+
+                            // If last is assistant, mark it as animating so controls hide
+                            if let last = store.activeMessages.last, last.role == .assistant {
+                                animatingAssistantID = id
+                                let textLength = last.text.count
+                                let total = Double(textLength) * 0.01 + 0.25
+                                Task {
+                                    try? await Task.sleep(
+                                        nanoseconds: UInt64(total * 1_000_000_000)
+                                    )
+                                    await MainActor.run {
+                                        if animatingAssistantID == id {
+                                            animatingAssistantID = nil
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1415,31 +1725,29 @@ struct ChatView: View {
         showTyping = true
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
 
-        await store.send(q, googleToken: auth.accessToken)
+        let token = await auth.ensureValidAccessToken()
+        await store.send(q, googleToken: token)
 
         showTyping = false
         sending = false
+    }
+
+    private func handleSpeakToggle(for msg: Message) {
+        // If this message is already speaking/loading, stop it.
+        if speech.currentMessageID == msg.id && (speech.isPlaying || speech.isLoading) {
+            speech.stop()
+        } else {
+            // Start speaking this message
+            speech.speak(msg.text, messageID: msg.id)
+        }
     }
 }
 
 #Preview { ChatView() }
 
 // ======================================================
-// MARK: - Legacy (disabled)
-// ======================================================
-
-#if false
-import OpenAIKit
-import Combine
-#endif
-
-// ======================================================
 // MARK: - SIRI SHORTCUTS INLINE
 // ======================================================
-
-import AppIntents
-
-// MARK: - Intent
 
 struct AskHushhVoiceIntent: AppIntent {
     static var title: LocalizedStringResource = "Ask HushhVoice"
@@ -1454,20 +1762,32 @@ struct AskHushhVoiceIntent: AppIntent {
         Summary("Ask HushhVoice: \(\.$question)")
     }
 
+    // Optional: whether to bring the app to foreground
+    static var openAppWhenRun: Bool = false
+
+    static var suggestedInvocationPhrase: String {
+        "Ask HushhVoice to check my email"
+    }
+
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let googleToken = UserDefaults.standard.string(forKey: "google_access_token")
+        let token = await GoogleSignInManager.shared.ensureValidAccessToken()
         let data = try await HushhAPI.ask(
             prompt: question,
-            googleToken: googleToken   // 👈 send it through when present
+            googleToken: token
         )
 
-        let reply =
-            (data.display?.removingPercentEncoding ?? data.display)
-            ?? data.speech
+        let spoken =
+            (data.speech?.removingPercentEncoding ?? data.speech)
+            ?? (data.display?.removingPercentEncoding ?? data.display)
             ?? "I couldn't get a response."
 
+        let trimmed = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let short = trimmed.count > 280
+            ? String(trimmed.prefix(280)) + "…"
+            : trimmed
+
         return .result(
-            dialog: IntentDialog(stringLiteral: reply)
+            dialog: IntentDialog(stringLiteral: short)
         )
     }
 }
