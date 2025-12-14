@@ -61,6 +61,10 @@ struct Onboarding: View {
     // Onboarding-specific TTS manager (fixes mic bug by cancelling in-flight TTS)
     @StateObject private var tts = OnboardingTTSManager()
 
+    // Summary typing
+    @State private var typingTextForSummary: String = ""
+    @State private var summaryTypingTask: Task<Void, Never>?
+
     // MARK: Copy
 
     private let introLine =
@@ -81,9 +85,9 @@ struct Onboarding: View {
     private let SB_URL = "https://ibsisfnjxeowvdtvgzff.supabase.co"
     private let SB_TABLE = "investor_onboarding_via_hushhvoice"
 
-    // ⚠️ Do NOT hardcode real keys in the app. Put this in a build setting / xcconfig / server.
-    // Keeping as placeholder so you can paste your real key locally.
-    private let SB_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlic2lzZm5qeGVvd3ZkdHZnemZmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ1NTk1NzgsImV4cCI6MjA4MDEzNTU3OH0.K16sO1R9L2WZGPueDP0mArs2eDYZc-TnIk2LApDw_fs"
+    // NOTE: You asked to keep your real anon key in code. (This is extractable from the app binary.)
+    private let SB_ANON_KEY =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlic2lzZm5qeGVvd3ZkdHZnemZmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ1NTk1NzgsImV4cCI6MjA4MDEzNTU3OH0.K16sO1R9L2WZGPueDP0mArs2eDYZc-TnIk2LApDw_fs"
 
     private var userID: String {
         if !appleUserID.isEmpty { return appleUserID }
@@ -193,6 +197,7 @@ struct Onboarding: View {
                 appendTranscriptToCurrentAnswer(finalText)
             }
             typingTask?.cancel()
+            summaryTypingTask?.cancel()
             tts.stop()
         }
     }
@@ -206,8 +211,7 @@ struct Onboarding: View {
         if done {
             page = 6
         } else {
-            // allow resume on 0..5 (intro/questions/summary)
-            let p = min(max(savedPage, 0), 5)
+            let p = min(max(savedPage, 0), 5) // resume 0..5
             page = p
         }
 
@@ -274,7 +278,6 @@ struct Onboarding: View {
 
     private var card: some View {
         VStack(alignment: .leading, spacing: 14) {
-
             HStack(alignment: .center) {
                 Text(pageTitle)
                     .font(.headline.weight(.semibold))
@@ -306,36 +309,12 @@ struct Onboarding: View {
                 }
             }
 
+            // IMPORTANT FIX:
+            // The SUMMARY content is now inside a ScrollView with a max height,
+            // so the card never grows infinitely and the bottom bar never gets pushed off-screen.
             if page == 5 {
-                // SUMMARY PAGE: show summary text with typing + TTS controls
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(typingText.isEmpty ? pagePrompt : typingText)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(HVTheme.botText)
-                        .lineSpacing(4)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if !summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(typingTextForSummary.isEmpty ? summaryText : typingTextForSummary)
-                            .font(.body)
-                            .foregroundStyle(HVTheme.botText.opacity(0.95))
-                            .lineSpacing(4)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, 2)
-                    } else if isSaving {
-                        HStack(spacing: 10) {
-                            ProgressView().scaleEffect(0.95)
-                            Text("Creating your summary…")
-                                .font(.footnote)
-                                .foregroundStyle(HVTheme.botText.opacity(0.75))
-                        }
-                        .padding(.top, 4)
-                    }
-
-                    summaryControls
-                }
+                summaryScrollableBlock
             } else {
-                // All other pages use the standard prompt typing
                 Text(typingText.isEmpty ? pagePrompt : typingText)
                     .font(page == 0 ? .body : .title3.weight(.semibold))
                     .foregroundStyle(HVTheme.botText)
@@ -371,6 +350,48 @@ struct Onboarding: View {
         case 1...4: return "Let’s personalize you"
         case 5: return "What I understood"
         default: return "You’re set"
+        }
+    }
+
+    // MARK: - Summary scrollable block (FIX)
+
+    private var summaryScrollableBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+
+            // The whole summary area scrolls; buttons stay outside in bottom bar.
+            ScrollView(showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(typingText.isEmpty ? pagePrompt : typingText)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(HVTheme.botText)
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if !summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(typingTextForSummary.isEmpty ? summaryText : typingTextForSummary)
+                            .font(.body)
+                            .foregroundStyle(HVTheme.botText.opacity(0.95))
+                            .lineSpacing(4)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 2)
+                    } else if isSaving {
+                        HStack(spacing: 10) {
+                            ProgressView().scaleEffect(0.95)
+                            Text("Creating your summary…")
+                                .font(.footnote)
+                                .foregroundStyle(HVTheme.botText.opacity(0.75))
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 4)
+            }
+            // This cap is the key: prevents card from growing forever
+            .frame(maxHeight: 260)
+            .padding(.top, 2)
+
+            summaryControls
         }
     }
 
@@ -469,13 +490,9 @@ struct Onboarding: View {
 
     // MARK: - Summary controls
 
-    @State private var typingTextForSummary: String = ""
-    @State private var summaryTypingTask: Task<Void, Never>?
-
     private var summaryControls: some View {
         HStack(spacing: 10) {
             Button {
-                // Toggle speak: if busy stop, else speak the combined summary prompt+text
                 if isTTSBusy {
                     tts.stop()
                     markHeardIfNeeded()
@@ -516,12 +533,10 @@ struct Onboarding: View {
         if now < ttsCooldownUntil { return }
         ttsCooldownUntil = now.addingTimeInterval(1.0)
 
-        // stop STT just in case
         stt.stop(commit: true) { finalText in
             appendTranscriptToCurrentAnswer(finalText)
         }
 
-        // Speak prompt + summary as one coherent utterance
         let combined = """
         \(summaryIntro)
 
@@ -655,16 +670,14 @@ struct Onboarding: View {
     private var nextDisabled: Bool {
         if isSaving { return true }
 
-        // Gate interaction only for Q pages (not intro, not summary)
         if (1...4).contains(page) && !canInteract { return true }
         if (1...4).contains(page) && currentAnswerIsEmpty { return true }
 
-        // On summary page: disable "Continue" while loading summary
+        // While summary is generating, disable Continue
         if page == 5 && summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isSaving {
             return true
         }
 
-        // Intro can always proceed
         return false
     }
 
@@ -674,16 +687,13 @@ struct Onboarding: View {
         errorText = nil
         appearTick += 1
 
-        // stop STT (commit) and stop onboarding TTS
         stt.stop(commit: true) { finalText in
             appendTranscriptToCurrentAnswer(finalText)
         }
         tts.stop()
 
-        // prompt typing
         startTyping(pagePrompt)
 
-        // summary page: also type the summary itself if present
         if newPage == 5 {
             if !summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 startSummaryTyping(summaryText)
@@ -697,10 +707,8 @@ struct Onboarding: View {
         }
 
         if speak {
-            // auto-speak should not be blocked by cooldown
             playTTS(text: pagePrompt, bypassCooldown: true)
 
-            // On summary page, speak the summary right after prompt (if it exists)
             if newPage == 5, !summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     self.speakSummary()
@@ -708,7 +716,6 @@ struct Onboarding: View {
             }
         }
 
-        // Always unlock within a short window to prevent "dead" UI
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             if self.page == newPage, !self.canInteract {
                 self.hasHeardPage[newPage] = true
@@ -760,12 +767,10 @@ struct Onboarding: View {
             ttsCooldownUntil = now.addingTimeInterval(1.0)
         }
 
-        // stop STT first
         stt.stop(commit: true) { finalText in
             appendTranscriptToCurrentAnswer(finalText)
         }
 
-        // stop any existing TTS then speak
         tts.stop()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
@@ -778,7 +783,6 @@ struct Onboarding: View {
     private func micTapped() async {
         errorText = nil
 
-        // If UI is gated, tapping mic means "interrupt and go"
         if !canInteract, hasHeardPage.indices.contains(page) {
             hasHeardPage[page] = true
         }
@@ -790,7 +794,6 @@ struct Onboarding: View {
             return
         }
 
-        // HARD STOP TTS (also cancels in-flight fetch) + clean session
         await stopTTSAndWait()
 
         if !didRequestPermsOnce {
@@ -867,7 +870,6 @@ struct Onboarding: View {
     private func nextTapped() async {
         errorText = nil
 
-        // Stop STT and commit transcript
         stt.stop(commit: true) { finalText in
             appendTranscriptToCurrentAnswer(finalText)
         }
@@ -893,15 +895,12 @@ struct Onboarding: View {
 
             isSaving = true
             do {
-                // 1) Save to Supabase
                 try await submitAllAnswersOnce()
 
-                // 2) Build & fetch “what I understood” from General endpoint
                 let summary = try await fetchInvestorSummary()
                 summaryText = summary
                 persistState()
 
-                // 3) Move to summary page (don’t mark done yet; user should see it)
                 page = 5
             } catch let e as NSError {
                 let msg = (e.userInfo[NSLocalizedDescriptionKey] as? String) ?? e.localizedDescription
@@ -914,7 +913,6 @@ struct Onboarding: View {
         }
 
         if page == 5 {
-            // User has seen summary, now we can mark completion and show final choices
             done = true
             persistState()
             page = 6
@@ -925,15 +923,6 @@ struct Onboarding: View {
     private func submitAllAnswersOnce() async throws {
         guard let url = URL(string: "\(SB_URL)/rest/v1/\(SB_TABLE)") else {
             throw URLError(.badURL)
-        }
-
-        // Fail loudly if key placeholder is still present
-        if SB_ANON_KEY.contains("<PASTE_YOUR_SUPABASE_ANON_KEY_HERE>") {
-            throw NSError(
-                domain: "Onboarding",
-                code: -10,
-                userInfo: [NSLocalizedDescriptionKey: "Supabase anon key not set in Onboarding.swift"]
-            )
         }
 
         var req = URLRequest(url: url)
@@ -965,10 +954,8 @@ struct Onboarding: View {
     }
 
     private func fetchInvestorSummary() async throws -> String {
-        // “General endpoint” = HushhAPI.ask(...) which hits /siri/ask
         let token = await google.ensureValidAccessToken()
 
-        // Compact merged context (no “diff” framing)
         let mergedContext = """
         Net worth: \(answers[0])
         Investment goals/plans: \(answers[1])
@@ -995,13 +982,13 @@ struct Onboarding: View {
         let data = try await HushhAPI.ask(prompt: prompt, googleToken: token)
 
         let text =
-            (data.display?.removingPercentEncoding ?? data.display)
-            ?? (data.speech?.removingPercentEncoding ?? data.speech)
-            ?? ""
+        (data.display?.removingPercentEncoding ?? data.display)
+        ?? (data.speech?.removingPercentEncoding ?? data.speech)
+        ?? ""
 
         var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Safety: enforce max ~6 lines even if model gets chatty
+        // Enforce max 6 lines
         let lines = cleaned
             .split(separator: "\n", omittingEmptySubsequences: true)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1010,22 +997,19 @@ struct Onboarding: View {
             cleaned = lines.prefix(6).joined(separator: "\n")
         }
 
-        // Hard fallback if API returns empty
         if cleaned.isEmpty {
             return """
             Here’s what I understood:
-            Your net worth gives us your current financial baseline.
-            Your investment goals highlight what you’re working toward next.
-            You shared what kind of health support would be most useful.
-            You also shared the wealth support you want right now.
+            Your net worth sets your current financial baseline.
+            Your investment goals show what you want to achieve next.
+            You shared the kind of health support you’re looking for.
+            You shared the wealth support you want right now.
             I’ll personalize your next steps based on this.
             """
         }
 
         return cleaned
     }
-
-
 }
 
 // MARK: - OnboardingTTSManager
@@ -1065,7 +1049,6 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
 
             self.configureAudioSessionForTTS()
 
-            // 1) Try backend TTS (same endpoint your SpeechManager uses)
             do {
                 let audioData = try await HushhAPI.tts(text: trimmed, voice: "alloy")
                 if Task.isCancelled { return }
@@ -1081,7 +1064,7 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
                 p.play()
                 return
             } catch {
-                // Fall back to local voice
+                // fall back
             }
 
             if Task.isCancelled { return }
@@ -1100,15 +1083,11 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
     }
 
     func stop() {
-        // Invalidate token so any late async completion is ignored
         activeToken = UUID()
-
         speakTask?.cancel()
         speakTask = nil
 
-        if let player, player.isPlaying {
-            player.stop()
-        }
+        if let player, player.isPlaying { player.stop() }
         player = nil
 
         if synth.isSpeaking {
@@ -1121,8 +1100,6 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
         deactivateAudioSession()
     }
 
-    // MARK: AVAudioPlayerDelegate / AVSpeechSynthesizerDelegate
-
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         stop()
     }
@@ -1130,8 +1107,6 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         stop()
     }
-
-    // MARK: Audio session
 
     private func configureAudioSessionForTTS() {
         do {
@@ -1141,9 +1116,7 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
                 options: [.duckOthers, .defaultToSpeaker, .allowBluetooth]
             )
             try AVAudioSession.sharedInstance().setActive(true, options: [])
-        } catch {
-            // If this fails, we’ll still attempt to speak; iOS will pick a route.
-        }
+        } catch { }
     }
 
     private func deactivateAudioSession() {
@@ -1151,7 +1124,7 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
     }
 }
 
-// MARK: - STTController (fresh AVAudioEngine per start; eliminates “works once” failures)
+// MARK: - STTController (fresh AVAudioEngine per start)
 
 @MainActor
 final class STTController: ObservableObject {
