@@ -11,6 +11,20 @@
 		C667B6392EAE825C00FD00D6 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C667B6382EAE825C00FD00D6 /* ContentView.swift */; };
 		C667B63B2EAE825D00FD00D6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C667B63A2EAE825D00FD00D6 /* Assets.xcassets */; };
 		C667B63E2EAE825D00FD00D6 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C667B63D2EAE825D00FD00D6 /* Preview Assets.xcassets */; };
+		C6AD30FD2EED888800A50130 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD30FC2EED888800A50130 /* Auth */; };
+		C6AD30FF2EED888800A50130 /* Functions in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD30FE2EED888800A50130 /* Functions */; };
+		C6AD31012EED888800A50130 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31002EED888800A50130 /* PostgREST */; };
+		C6AD31032EED888800A50130 /* Realtime in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31022EED888800A50130 /* Realtime */; };
+		C6AD31052EED888800A50130 /* Storage in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31042EED888800A50130 /* Storage */; };
+		C6AD310C2EED910F00A50130 /* SupabaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6AD310B2EED910700A50130 /* SupabaseManager.swift */; };
+		C6AD310E2EED914000A50130 /* AppleSupabaseAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6AD310D2EED913C00A50130 /* AppleSupabaseAuth.swift */; };
+		C6AD31102EED956B00A50130 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD310F2EED956B00A50130 /* Auth */; };
+		C6AD31122EED956B00A50130 /* Functions in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31112EED956B00A50130 /* Functions */; };
+		C6AD31142EED956B00A50130 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31132EED956B00A50130 /* PostgREST */; };
+		C6AD31162EED956B00A50130 /* Realtime in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31152EED956B00A50130 /* Realtime */; };
+		C6AD31182EED956B00A50130 /* Storage in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31172EED956B00A50130 /* Storage */; };
+		C6AD311B2EED965000A50130 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD311A2EED965000A50130 /* Supabase */; };
+		C6AD31272EEE7CFD00A50130 /* Onboarding.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6AD31262EEE7CF100A50130 /* Onboarding.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -20,6 +34,10 @@
 		C667B6382EAE825C00FD00D6 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		C667B63A2EAE825D00FD00D6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C667B63D2EAE825D00FD00D6 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		C6AD310A2EED8CE000A50130 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		C6AD310B2EED910700A50130 /* SupabaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseManager.swift; sourceTree = "<group>"; };
+		C6AD310D2EED913C00A50130 /* AppleSupabaseAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSupabaseAuth.swift; sourceTree = "<group>"; };
+		C6AD31262EEE7CF100A50130 /* Onboarding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Onboarding.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -27,6 +45,17 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C6AD311B2EED965000A50130 /* Supabase in Frameworks */,
+				C6AD31162EED956B00A50130 /* Realtime in Frameworks */,
+				C6AD31012EED888800A50130 /* PostgREST in Frameworks */,
+				C6AD30FF2EED888800A50130 /* Functions in Frameworks */,
+				C6AD31102EED956B00A50130 /* Auth in Frameworks */,
+				C6AD30FD2EED888800A50130 /* Auth in Frameworks */,
+				C6AD31142EED956B00A50130 /* PostgREST in Frameworks */,
+				C6AD31122EED956B00A50130 /* Functions in Frameworks */,
+				C6AD31052EED888800A50130 /* Storage in Frameworks */,
+				C6AD31182EED956B00A50130 /* Storage in Frameworks */,
+				C6AD31032EED888800A50130 /* Realtime in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -37,6 +66,7 @@
 			isa = PBXGroup;
 			children = (
 				C667B6352EAE825C00FD00D6 /* HushhVoice */,
+				C6AD31192EED965000A50130 /* Frameworks */,
 				C667B6342EAE825C00FD00D6 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -52,6 +82,10 @@
 		C667B6352EAE825C00FD00D6 /* HushhVoice */ = {
 			isa = PBXGroup;
 			children = (
+				C6AD31262EEE7CF100A50130 /* Onboarding.swift */,
+				C6AD310D2EED913C00A50130 /* AppleSupabaseAuth.swift */,
+				C6AD310B2EED910700A50130 /* SupabaseManager.swift */,
+				C6AD310A2EED8CE000A50130 /* Info.plist */,
 				C65190D72EB2228B00B45989 /* HushhVoice.entitlements */,
 				C667B6362EAE825C00FD00D6 /* HushhVoiceApp.swift */,
 				C667B6382EAE825C00FD00D6 /* ContentView.swift */,
@@ -67,6 +101,13 @@
 				C667B63D2EAE825D00FD00D6 /* Preview Assets.xcassets */,
 			);
 			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		C6AD31192EED965000A50130 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -113,6 +154,9 @@
 				Base,
 			);
 			mainGroup = C667B62A2EAE825C00FD00D6;
+			packageReferences = (
+				C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			productRefGroup = C667B6342EAE825C00FD00D6 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -139,7 +183,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C6AD310C2EED910F00A50130 /* SupabaseManager.swift in Sources */,
 				C667B6392EAE825C00FD00D6 /* ContentView.swift in Sources */,
+				C6AD31272EEE7CFD00A50130 /* Onboarding.swift in Sources */,
+				C6AD310E2EED914000A50130 /* AppleSupabaseAuth.swift in Sources */,
 				C667B6372EAE825C00FD00D6 /* HushhVoiceApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -273,12 +320,15 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = HushhVoice/HushhVoice.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_ASSET_PATHS = "\"HushhVoice/Preview Content\"";
 				DEVELOPMENT_TEAM = WVDK9JW99C;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = HushhVoice/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = HushhVoice;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "HushhVoice needs microphone access to record your answers.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "HushhVoice uses speech recognition to transcribe your voice.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -304,12 +354,15 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = HushhVoice/HushhVoice.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_ASSET_PATHS = "\"HushhVoice/Preview Content\"";
 				DEVELOPMENT_TEAM = WVDK9JW99C;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = HushhVoice/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = HushhVoice;
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "HushhVoice needs microphone access to record your answers.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "HushhVoice uses speech recognition to transcribe your voice.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -350,6 +403,75 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.5.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		C6AD30FC2EED888800A50130 /* Auth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Auth;
+		};
+		C6AD30FE2EED888800A50130 /* Functions */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Functions;
+		};
+		C6AD31002EED888800A50130 /* PostgREST */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = PostgREST;
+		};
+		C6AD31022EED888800A50130 /* Realtime */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Realtime;
+		};
+		C6AD31042EED888800A50130 /* Storage */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Storage;
+		};
+		C6AD310F2EED956B00A50130 /* Auth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Auth;
+		};
+		C6AD31112EED956B00A50130 /* Functions */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Functions;
+		};
+		C6AD31132EED956B00A50130 /* PostgREST */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = PostgREST;
+		};
+		C6AD31152EED956B00A50130 /* Realtime */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Realtime;
+		};
+		C6AD31172EED956B00A50130 /* Storage */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Storage;
+		};
+		C6AD311A2EED965000A50130 /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C6AD30FB2EED888800A50130 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = C667B62B2EAE825C00FD00D6 /* Project object */;
 }
