@@ -666,10 +666,11 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
     private func configureAudioSession() {
         do {
             try AVAudioSession.sharedInstance().setCategory(
-                .playback,
+                .playAndRecord,
                 mode: .spokenAudio,
-                options: [.duckOthers]
+                options: [.duckOthers, .defaultToSpeaker, .allowBluetooth]
             )
+
             try AVAudioSession.sharedInstance().setActive(true, options: [])
         } catch {
             print("AudioSession error: \(error)")
@@ -1009,9 +1010,9 @@ struct StreamingMarkdownText: View {
 // ======================================================
 // MARK: - HEADER (clean)
 // ======================================================
-
 struct HeaderBar: View {
     var onToggleSidebar: (() -> Void)?
+    var onGoToHushhTech: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1026,6 +1027,18 @@ struct HeaderBar: View {
                 .foregroundStyle(HVTheme.botText)
 
             Spacer()
+
+            Button {
+                onGoToHushhTech?()
+            } label: {
+                Text("Go to HushhTech")
+                    .font(.footnote.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(HVTheme.surfaceAlt))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
+            }
+            .foregroundStyle(HVTheme.botText)
         }
         .padding(.horizontal)
         .padding(.top, 8)
@@ -1825,20 +1838,27 @@ struct AuthGateView: View {
                 }
                 .foregroundColor(.black)
 
-                Text("or")
-                    .foregroundStyle(.white.opacity(0.6))
-                    .font(.footnote)
+//                Text("or")
+//                    .foregroundStyle(.white.opacity(0.6))
+//                    .font(.footnote)
+//
+//                Button {
+//                    AppleSupabaseAuth.shared.signIn()
+//                } label: {
+//                    HStack {
+//                        Image(systemName: "applelogo")
+//                        Text("Continue with Apple")
+//                    }
+//                    .font(.subheadline.weight(.semibold))
+//                    .frame(maxWidth: .infinity)
+//                    .padding(.vertical, 12)
+//                    .background(
+//                        RoundedRectangle(cornerRadius: 12)
+//                            .fill(Color.white)
+//                    )
+//                }
+//                .foregroundColor(.black)
 
-                SignInWithAppleButton(
-                    .signIn,
-                    onRequest: { request in
-                        request.requestedScopes = [.fullName, .email]
-                    },
-                    onCompletion: handleAppleAuth
-                )
-                .signInWithAppleButtonStyle(.white)
-                .frame(height: 44)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
             }
             .padding(.horizontal, 32)
 
@@ -1849,10 +1869,10 @@ struct AuthGateView: View {
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.7))
                     .multilineTextAlignment(.center)
-                Text("Sign in with Apple is optional and lets you link your HushhVoice identity.")
-                    .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.5))
-                    .multilineTextAlignment(.center)
+//                Text("Sign in with Apple is optional and lets you link your HushhVoice identity.")
+//                    .font(.footnote)
+//                    .foregroundStyle(.white.opacity(0.5))
+//                    .multilineTextAlignment(.center)
             }
             .padding(.horizontal, 24)
 
@@ -1890,6 +1910,8 @@ struct ChatView: View {
     @StateObject private var store = ChatStore()
     @ObservedObject var auth = GoogleSignInManager.shared
     @ObservedObject var speech = SpeechManager.shared
+    @AppStorage("hv_has_completed_investor_onboarding") private var hvDone: Bool = false
+    @State private var showInvestorOnboarding: Bool = false
 
     @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
     @AppStorage("hushh_is_dark") private var isDarkMode: Bool = true
@@ -1927,6 +1949,16 @@ struct ChatView: View {
                 }
             } else {
                 mainChat
+                    .onAppear {
+                        // When user is authenticated, show onboarding if not completed
+                        if !hvDone {
+                            showInvestorOnboarding = true
+                        }
+                    }
+                    .sheet(isPresented: $showInvestorOnboarding) {
+                        Onboarding()
+                    }
+
             }
         }
         .preferredColorScheme(isDarkMode ? .dark : .light)
@@ -1939,6 +1971,7 @@ struct ChatView: View {
         }
     }
 
+
     private var mainChat: some View {
         ZStack(alignment: .leading) {
             VStack(spacing: 0) {
@@ -1946,7 +1979,10 @@ struct ChatView: View {
                     withAnimation(.easeInOut(duration: 0.22)) {
                         showSidebar.toggle()
                     }
+                } onGoToHushhTech: {
+                    showInvestorOnboarding = true
                 }
+
 
                 ScrollViewReader { proxy in
                     ZStack {
@@ -2092,12 +2128,13 @@ struct ChatView: View {
         }
         .onAppear {
             randomizeEmptyPhrase()
-            if !hasSeenIntro {
+            if !hasSeenIntro && hvDone {
                 hasSeenIntro = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     showingIntro = true
                 }
             }
+
         }
         .onChange(of: store.activeChatID) { _ in
             randomizeEmptyPhrase()
