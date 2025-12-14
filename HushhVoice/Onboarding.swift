@@ -968,26 +968,27 @@ struct Onboarding: View {
         // “General endpoint” = HushhAPI.ask(...) which hits /siri/ask
         let token = await google.ensureValidAccessToken()
 
-        // Give the model clean merged context (not “diff per question”)
+        // Compact merged context (no “diff” framing)
         let mergedContext = """
-        Investor shared:
-        - Net worth: \(answers[0])
-        - Investment goals/plans: \(answers[1])
-        - Health help requested: \(answers[2])
-        - Wealth help requested: \(answers[3])
+        Net worth: \(answers[0])
+        Investment goals/plans: \(answers[1])
+        Health help: \(answers[2])
+        Wealth help: \(answers[3])
         """
 
         let prompt = """
-        You are Agent Kai (HushhVoice). Write a single, warm, positive paragraph summarizing what Hushh understands about this investor based ONLY on what they shared below.
+        You are Agent Kai (HushhVoice).
+        Write a short, clear, positive summary of what you understood about the user from the information below.
 
-        Strict requirements:
-        - Output exactly ONE paragraph (no bullets, no headings, no numbered lists).
-        - Always positive, appreciative, and human.
-        - Do not mention anything “missing”, “unclear”, “not provided”, or “we need more info”.
-        - Do not include warnings, disclaimers, or negativity.
-        - Do not add facts that were not stated. You may gently infer tone like “thoughtful” or “intentional”, but don’t invent numbers or details.
-        - Keep it 70–120 words.
+        Rules:
+        - Output 5–6 lines MAX (use short lines; line breaks allowed).
+        - Sound natural and helpful like a voice assistant.
+        - Do NOT mention missing info, uncertainty, or what they didn’t say.
+        - Do NOT add facts that were not stated.
+        - Keep it warm, confident, and simple.
+        - No headings, no bullets, no numbering, no emojis.
 
+        User info:
         \(mergedContext)
         """
 
@@ -998,17 +999,32 @@ struct Onboarding: View {
             ?? (data.speech?.removingPercentEncoding ?? data.speech)
             ?? ""
 
-        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Safety: enforce max ~6 lines even if model gets chatty
+        let lines = cleaned
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+
+        if lines.count > 6 {
+            cleaned = lines.prefix(6).joined(separator: "\n")
+        }
 
         // Hard fallback if API returns empty
         if cleaned.isEmpty {
             return """
-            Based on what you shared, Hushh understands your current financial position and the direction you want to take with your investments, along with the kind of support you’d value across both health and wealth. We’ll use this to personalize your experience so your next steps feel clear, relevant, and aligned with your goals—while keeping everything simple, private, and under your control.
+            Here’s what I understood:
+            Your net worth gives us your current financial baseline.
+            Your investment goals highlight what you’re working toward next.
+            You shared what kind of health support would be most useful.
+            You also shared the wealth support you want right now.
+            I’ll personalize your next steps based on this.
             """
         }
 
         return cleaned
     }
+
 
 }
 
