@@ -2,63 +2,94 @@
 //  Onboarding.swift
 //  HushhVoice
 //
+//  FINAL FLOW (as per your latest requirements):
+//   0) HushhVoice Intro screen (after sign-in) ✅
+//   1) Voice picker screen (tap a voice -> plays 3–4s preview) ✅
+//   2..5) 4 standard questions (same UI) ✅
+//   6) Agent follow-ups using /onboarding/agent (EXACT SAME UI as questions) ✅
+//        - loader while waiting ✅
+//        - no “handoff” filler line ✅
+//   7) Summary screen (Thanks + summary) ✅
+//        - do NOT show “enough info to prefill…” ✅
+//        - jump straight to summary when backend returns redirect ✅
+//   8) Final choices ✅
+//
+//  NOTE:
+//  - This file includes STTController + OnboardingTTSManager so “Cannot find STTController” won’t happen.
+//
 
 import SwiftUI
 import Foundation
 import Speech
 import AVFoundation
 
+// ======================================================
+// MARK: - Onboarding
+// ======================================================
+
 struct Onboarding: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
-    // Completion flag: set true only after final submit + summary step
+    // Completion flag
     @AppStorage("hv_has_completed_investor_onboarding") private var done: Bool = false
 
+    // Voice choice
+    @AppStorage("hv_selected_voice") private var selectedVoice: String = "alloy"
+    @AppStorage("hv_has_chosen_voice") private var hasChosenVoice: Bool = false
+
     // Resume state
-    @AppStorage("hv_onboarding_page") private var savedPage: Int = 0
+    @AppStorage("hv_onboarding_page_v4") private var savedPage: Int = 0
     @AppStorage("hv_onboarding_a0") private var a0: String = ""
     @AppStorage("hv_onboarding_a1") private var a1: String = ""
     @AppStorage("hv_onboarding_a2") private var a2: String = ""
     @AppStorage("hv_onboarding_a3") private var a3: String = ""
     @AppStorage("hv_onboarding_summary") private var savedSummary: String = ""
 
-    @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
+    // Agent state (minimal)
+    @AppStorage("hv_onboarding_agent_qcount") private var savedAgentQCount: Int = 1
+    @AppStorage("hv_onboarding_agent_prompt") private var savedAgentPrompt: String = ""
 
+    @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
     @ObservedObject private var google = GoogleSignInManager.shared
 
-    // 0=intro, 1..4 questions, 5=summary, 6=final choices
+    // Pages:
+    // 0=intro, 1=voice, 2..5=standard Qs, 6=agent Qs, 7=summary, 8=final
     @State private var page: Int = 0
     @State private var didInitialRestore: Bool = false
 
-    // Answers stored locally (editable)
+    // Standard answers (4)
     @State private var answers: [String] = ["", "", "", ""]
 
-    // Summary page text
+    // Agent follow-up prompt + answer (same UI as standard)
+    @State private var agentPrompt: String = ""
+    @State private var agentAnswer: String = ""
+    @State private var agentQuestionsAsked: Int = 1
+    @State private var didSeedAgent: Bool = false
+
+    // Summary
     @State private var summaryText: String = ""
 
     // Permissions
     @State private var permissionDenied: Bool = false
     @State private var didRequestPermsOnce: Bool = false
 
-    // Save / error
+    // Loading / errors
     @State private var isSaving: Bool = false
+    @State private var isAgentLoading: Bool = false
     @State private var errorText: String?
 
-    // Typing animation
+    // Typing animation for prompt text
     @State private var typingText: String = ""
     @State private var typingTask: Task<Void, Never>?
-    @State private var appearTick: Int = 0
 
-    // Gate interaction until prompt was heard once
-    @State private var hasHeardPage: [Bool] = Array(repeating: false, count: 7) // 0..6
+    // Gate interaction until prompt heard once
+    @State private var hasHeardPage: [Bool] = Array(repeating: false, count: 9)
     @State private var ttsCooldownUntil: Date = .distantPast
 
-    // STT controller (fresh engine each start)
+    // STT + TTS
     @StateObject private var stt = STTController(localeID: "en-US")
-
-    // Onboarding-specific TTS manager (fixes mic bug by cancelling in-flight TTS)
     @StateObject private var tts = OnboardingTTSManager()
 
     // Summary typing
@@ -70,6 +101,9 @@ struct Onboarding: View {
     private let introLine =
     "Welcome! I’m Agent Kai by Hushh, your AI financial agent. I’ll guide you through investor onboarding with a few quick questions, so I can help you make smarter, more informed financial decisions. Let’s get started."
 
+    private let voiceIntroLine =
+    "Choose a voice to customize Agent Kai. Tap any voice to hear a quick preview."
+
     private let questions: [String] = [
         "What is your approximate net worth? This helps us understand your financial position for personalized insights. Feel free to answer in depth.",
         "What are your current investment goals or plans? Feel free to share anything you’re considering right now.",
@@ -78,14 +112,12 @@ struct Onboarding: View {
     ]
 
     private let summaryIntro =
-    "Here’s what I understood about you as an investor based on your answers."
+    "Thanks for the information — this helps us understand you better. Here’s a quick summary of what we understood about you."
 
-    // MARK: Supabase (single write at end)
+    // MARK: Supabase (final write at end)
 
     private let SB_URL = "https://ibsisfnjxeowvdtvgzff.supabase.co"
     private let SB_TABLE = "investor_onboarding_via_hushhvoice"
-
-    // NOTE: You asked to keep your real anon key in code. (This is extractable from the app binary.)
     private let SB_ANON_KEY =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlic2lzZm5qeGVvd3ZkdHZnemZmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ1NTk1NzgsImV4cCI6MjA4MDEzNTU3OH0.K16sO1R9L2WZGPueDP0mArs2eDYZc-TnIk2LApDw_fs"
 
@@ -95,14 +127,22 @@ struct Onboarding: View {
         return UUID().uuidString
     }
 
+    // MARK: Prompt per page
+
     private var pagePrompt: String {
         switch page {
         case 0: return introLine
-        case 1...4: return questions[page - 1]
-        case 5: return summaryIntro
+        case 1: return voiceIntroLine
+        case 2...5: return questions[page - 2]
+        case 6:
+            // IMPORTANT: no filler line — either show current agent prompt or nothing while loading
+            return agentPrompt
+        case 7: return summaryIntro
         default: return "All set. Choose what you want to do next."
         }
     }
+
+    private var isTTSBusy: Bool { tts.isPlaying || tts.isLoading }
 
     private var canInteract: Bool {
         hasHeardPage.indices.contains(page) ? hasHeardPage[page] : true
@@ -110,26 +150,35 @@ struct Onboarding: View {
 
     private var currentAnswerBinding: Binding<String> {
         Binding(
-            get: { (1...4).contains(page) ? answers[page - 1] : "" },
+            get: {
+                if (2...5).contains(page) { return answers[page - 2] }
+                if page == 6 { return agentAnswer }
+                return ""
+            },
             set: { newValue in
-                guard (1...4).contains(page) else { return }
-                answers[page - 1] = newValue
+                if (2...5).contains(page) { answers[page - 2] = newValue }
+                if page == 6 { agentAnswer = newValue }
             }
         )
     }
 
     private var currentAnswerIsEmpty: Bool {
-        guard (1...4).contains(page) else { return false }
-        return answers[page - 1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if (2...5).contains(page) {
+            return answers[page - 2].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if page == 6 {
+            return agentAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return false
     }
 
-    private var allAnswersFilled: Bool {
+    private var allStandardAnswersFilled: Bool {
         answers.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
-    private var isTTSBusy: Bool { tts.isPlaying || tts.isLoading }
-
+    // ======================================================
     // MARK: UI
+    // ======================================================
 
     var body: some View {
         ZStack {
@@ -151,10 +200,6 @@ struct Onboarding: View {
 
                 card
                     .padding(.horizontal, 16)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .trailing).combined(with: .opacity),
-                        removal: .move(edge: .leading).combined(with: .opacity)
-                    ))
                     .id(page)
 
                 if let errorText {
@@ -162,7 +207,6 @@ struct Onboarding: View {
                         .font(.footnote)
                         .foregroundStyle(.red)
                         .padding(.horizontal, 16)
-                        .transition(.opacity)
                 }
 
                 Spacer()
@@ -180,39 +224,35 @@ struct Onboarding: View {
                 enterPage(newPage, speak: true)
             }
         }
-        .onChange(of: answers) { _, _ in
-            if didInitialRestore { persistState() }
-        }
-        .onChange(of: summaryText) { _, _ in
-            if didInitialRestore { persistState() }
-        }
-        .onChange(of: tts.isPlaying) { _, playing in
-            if !playing { markHeardIfNeeded() }
-        }
-        .onChange(of: tts.isLoading) { _, loading in
-            if !loading && !tts.isPlaying { markHeardIfNeeded() }
-        }
+        .onChange(of: answers) { _, _ in if didInitialRestore { persistState() } }
+        .onChange(of: agentPrompt) { _, _ in if didInitialRestore { persistState() } }
+        .onChange(of: summaryText) { _, _ in if didInitialRestore { persistState() } }
+        .onChange(of: tts.isPlaying) { _, playing in if !playing { markHeardIfNeeded() } }
+        .onChange(of: tts.isLoading) { _, loading in if !loading && !tts.isPlaying { markHeardIfNeeded() } }
         .onDisappear {
-            stt.stop(commit: true) { finalText in
-                appendTranscriptToCurrentAnswer(finalText)
-            }
+            stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
             typingTask?.cancel()
             summaryTypingTask?.cancel()
             tts.stop()
         }
     }
 
-    // MARK: - Restore / Persist
+    // ======================================================
+    // MARK: Restore / Persist
+    // ======================================================
 
     private func restoreState() {
         answers = [a0, a1, a2, a3]
         summaryText = savedSummary
+        agentQuestionsAsked = max(1, savedAgentQCount)
+        agentPrompt = savedAgentPrompt
 
         if done {
-            page = 6
+            page = 8
         } else {
-            let p = min(max(savedPage, 0), 5) // resume 0..5
-            page = p
+            // Always show intro first after sign-in
+            // then voice, then questions...
+            page = 0
         }
 
         didInitialRestore = true
@@ -226,9 +266,17 @@ struct Onboarding: View {
         a2 = answers[2]
         a3 = answers[3]
         savedSummary = summaryText
+        savedAgentQCount_toggleSafe(agentQuestionsAsked)
+        savedAgentPrompt = agentPrompt
     }
 
-    // MARK: - Header
+    private func savedAgentQCount_toggleSafe(_ v: Int) {
+        savedAgentQCount = max(1, v)
+    }
+
+    // ======================================================
+    // MARK: Header
+    // ======================================================
 
     private var header: some View {
         HStack {
@@ -247,9 +295,7 @@ struct Onboarding: View {
 
             Button {
                 tts.stop()
-                stt.stop(commit: true) { finalText in
-                    appendTranscriptToCurrentAnswer(finalText)
-                }
+                stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
                 persistState()
                 dismiss()
             } label: {
@@ -262,44 +308,44 @@ struct Onboarding: View {
             .foregroundStyle(HVTheme.botText)
         }
         .padding(.horizontal, 16)
-        .animation(.spring(response: 0.45, dampingFraction: 0.9), value: page)
     }
 
     private var subtitleText: String {
         switch page {
         case 0: return "Investor onboarding"
-        case 1...4: return "Question \(page) of 4"
-        case 5: return "Summary"
+        case 1: return "Choose voice"
+        case 2...5: return "Question \(page - 1) of 4"
+        case 6: return "Follow-ups"
+        case 7: return "Summary"
         default: return "Completed"
         }
     }
 
-    // MARK: - Card
+    // ======================================================
+    // MARK: Card
+    // ======================================================
 
     private var card: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center) {
+
+            HStack {
                 Text(pageTitle)
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(HVTheme.botText.opacity(0.95))
-
                 Spacer()
 
-                if (1...4).contains(page) {
-                    HStack(spacing: 6) {
-                        ForEach(0..<4, id: \.self) { idx in
-                            Capsule()
-                                .fill(idx < page ? HVTheme.accent : HVTheme.stroke)
-                                .frame(width: idx < page ? 18 : 8, height: 6)
-                                .animation(.spring(response: 0.5, dampingFraction: 0.85), value: page)
-                        }
-                    }
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 10)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(HVTheme.surfaceAlt))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
-                } else if page == 5 {
-                    Text("Step 5 of 6")
+                if (2...5).contains(page) {
+                    progressPills(current: page - 1, total: 4)
+                } else if page == 6 {
+                    Text("Step 6 of 8")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(HVTheme.botText.opacity(0.7))
+                        .padding(.vertical, 6)
+                        .padding(.horizontal, 10)
+                        .background(RoundedRectangle(cornerRadius: 12).fill(HVTheme.surfaceAlt))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
+                } else if page == 7 {
+                    Text("Step 7 of 8")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(HVTheme.botText.opacity(0.7))
                         .padding(.vertical, 6)
@@ -309,28 +355,38 @@ struct Onboarding: View {
                 }
             }
 
-            // IMPORTANT FIX:
-            // The SUMMARY content is now inside a ScrollView with a max height,
-            // so the card never grows infinitely and the bottom bar never gets pushed off-screen.
-            if page == 5 {
+            if page == 1 {
+                voicePickerBlock
+            } else if page == 7 {
                 summaryScrollableBlock
             } else {
+                // Prompt text
                 Text(typingText.isEmpty ? pagePrompt : typingText)
                     .font(page == 0 ? .body : .title3.weight(.semibold))
                     .foregroundStyle(HVTheme.botText)
                     .lineSpacing(4)
                     .fixedSize(horizontal: false, vertical: true)
                     .opacity(0.98)
-                    .animation(.easeOut(duration: 0.2), value: typingText)
-            }
 
-            if page == 0 {
-                introControls
-            } else if (1...4).contains(page) {
-                answerBox
-                controlsRow
-            } else if page == 6 {
-                finalChoices
+                // Loader for agent follow-ups (fixes "stuck on previous question")
+                if page == 6 && isAgentLoading {
+                    HStack(spacing: 10) {
+                        ProgressView().scaleEffect(0.95)
+                        Text("One sec…")
+                            .font(.footnote)
+                            .foregroundStyle(HVTheme.botText.opacity(0.7))
+                    }
+                    .padding(.top, 4)
+                }
+
+                if page == 0 {
+                    introControls
+                } else if (2...6).contains(page) {
+                    answerBox
+                    controlsRow
+                } else if page == 8 {
+                    finalChoices
+                }
             }
         }
         .padding(18)
@@ -340,95 +396,130 @@ struct Onboarding: View {
                 .shadow(color: .black.opacity(0.35), radius: 18, x: 0, y: 10)
         )
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(HVTheme.stroke, lineWidth: 1))
-        .scaleEffect(0.985)
-        .animation(.spring(response: 0.55, dampingFraction: 0.88), value: appearTick)
+        .onAppear { appearTick() }
+    }
+
+    private func appearTick() {
+        // kick typing animation on first render
     }
 
     private var pageTitle: String {
         switch page {
         case 0: return "Welcome"
-        case 1...4: return "Let’s personalize you"
-        case 5: return "What I understood"
+        case 1: return "Pick your voice"
+        case 2...5: return "Let’s personalize you"
+        case 6: return "Let’s finish this"
+        case 7: return "Summary"
         default: return "You’re set"
         }
     }
 
-    // MARK: - Summary scrollable block (FIX)
-
-    private var summaryScrollableBlock: some View {
-        VStack(alignment: .leading, spacing: 10) {
-
-            // The whole summary area scrolls; buttons stay outside in bottom bar.
-            ScrollView(showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(typingText.isEmpty ? pagePrompt : typingText)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(HVTheme.botText)
-                        .lineSpacing(4)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if !summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(typingTextForSummary.isEmpty ? summaryText : typingTextForSummary)
-                            .font(.body)
-                            .foregroundStyle(HVTheme.botText.opacity(0.95))
-                            .lineSpacing(4)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, 2)
-                    } else if isSaving {
-                        HStack(spacing: 10) {
-                            ProgressView().scaleEffect(0.95)
-                            Text("Creating your summary…")
-                                .font(.footnote)
-                                .foregroundStyle(HVTheme.botText.opacity(0.75))
-                        }
-                        .padding(.top, 4)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.bottom, 4)
+    private func progressPills(current: Int, total: Int) -> some View {
+        HStack(spacing: 6) {
+            ForEach(0..<total, id: \.self) { idx in
+                Capsule()
+                    .fill(idx < current ? HVTheme.accent : HVTheme.stroke)
+                    .frame(width: idx < current ? 18 : 8, height: 6)
             }
-            // This cap is the key: prevents card from growing forever
-            .frame(maxHeight: 260)
-            .padding(.top, 2)
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(RoundedRectangle(cornerRadius: 12).fill(HVTheme.surfaceAlt))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
+    }
 
-            summaryControls
+    // ======================================================
+    // MARK: Voice Picker (page 1)
+    // ======================================================
+
+    private var voicePickerBlock: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Tap a voice to hear how Kai will sound.")
+                .font(.footnote)
+                .foregroundStyle(HVTheme.botText.opacity(0.65))
+
+            VStack(spacing: 10) {
+                voiceOption(
+                    id: "alloy",
+                    name: "Alloy",
+                    vibe: "Balanced, crisp, professional",
+                    preview: "Hey — I’m Alloy. I sound balanced, crisp, and professional. If you like clean and clear, I’m your voice."
+                )
+                voiceOption(
+                    id: "verse",
+                    name: "Verse",
+                    vibe: "Warm, expressive, conversational",
+                    preview: "Hey — I’m Verse. I sound warm and conversational. If you want something friendly and human, pick me."
+                )
+                voiceOption(
+                    id: "nova",
+                    name: "Nova",
+                    vibe: "Bright, confident, energetic",
+                    preview: "Hey — I’m Nova. I sound confident and energetic. If you like momentum and hype, I’m the one."
+                )
+                voiceOption(
+                    id: "sage",
+                    name: "Sage",
+                    vibe: "Calm, slow, reassuring",
+                    preview: "Hey — I’m Sage. I sound calm and reassuring. If you want something soothing and grounded, choose me."
+                )
+            }
+
+            Text("You can change this later in Settings.")
+                .font(.footnote)
+                .foregroundStyle(HVTheme.botText.opacity(0.6))
+                .padding(.top, 4)
         }
     }
 
-    // MARK: - Intro controls
+    private func voiceOption(id: String, name: String, vibe: String, preview: String) -> some View {
+        Button {
+            tts.stop()
+            selectedVoice = id
+            tts.speak(preview, voice: id) // play preview only on tap
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(name)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(HVTheme.botText)
+                    Text(vibe)
+                        .font(.footnote)
+                        .foregroundStyle(HVTheme.botText.opacity(0.65))
+                }
+                Spacer()
+                Image(systemName: selectedVoice == id ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selectedVoice == id ? HVTheme.accent : HVTheme.botText.opacity(0.35))
+                    .font(.system(size: 18, weight: .semibold))
+            }
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 16).fill(HVTheme.surfaceAlt))
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(HVTheme.stroke))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // ======================================================
+    // MARK: Intro controls (page 0)
+    // ======================================================
 
     private var introControls: some View {
-        HStack(spacing: 10) {
-            Button { toggleSpeakPrompt() } label: {
-                Label(isTTSBusy ? "Stop" : "Play", systemImage: isTTSBusy ? "stop.fill" : "speaker.wave.2.fill")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            }
-            .buttonStyle(.plain)
-            .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
-            .foregroundStyle(HVTheme.botText)
-            .disabled(!isTTSBusy && Date() < ttsCooldownUntil)
-
-            if !canInteract {
-                HStack(spacing: 8) {
-                    ProgressView().scaleEffect(0.9)
-                    Text("Listening…")
-                        .font(.footnote)
-                        .foregroundStyle(HVTheme.botText.opacity(0.6))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
-                .transition(.opacity)
-            }
+        Button { toggleSpeakPrompt() } label: {
+            Label(isTTSBusy ? "Stop" : "Play", systemImage: isTTSBusy ? "stop.fill" : "speaker.wave.2.fill")
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
         }
-        .animation(.easeOut(duration: 0.25), value: canInteract)
+        .buttonStyle(.plain)
+        .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
+        .foregroundStyle(HVTheme.botText)
+        .disabled(!isTTSBusy && Date() < ttsCooldownUntil)
     }
 
-    // MARK: - Answer box
+    // ======================================================
+    // MARK: Answer UI (pages 2..6 share)
+    // ======================================================
 
     private var answerBox: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -443,23 +534,20 @@ struct Onboarding: View {
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
+                .disabled(page == 6 && isAgentLoading) // lock while waiting
 
             if stt.isRecording {
                 Text(stt.transcript.isEmpty ? "Listening…" : "Heard: \(stt.transcript)")
                     .font(.footnote)
                     .foregroundStyle(HVTheme.botText.opacity(0.78))
                     .padding(.horizontal, 6)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
-        .animation(.easeOut(duration: 0.2), value: stt.transcript)
-        .animation(.easeOut(duration: 0.2), value: stt.isRecording)
     }
-
-    // MARK: - Controls row (Mic + Speaker)
 
     private var controlsRow: some View {
         HStack(spacing: 12) {
+
             Button { Task { await micTapped() } } label: {
                 HStack(spacing: 10) {
                     Image(systemName: stt.isRecording ? "stop.fill" : "mic.fill")
@@ -471,7 +559,8 @@ struct Onboarding: View {
             }
             .background(RoundedRectangle(cornerRadius: 14).fill(Color.white))
             .foregroundStyle(.black)
-            .opacity((canInteract || stt.isRecording) ? 1.0 : 0.85)
+            .disabled(page == 6 && isAgentLoading)
+            .opacity((page == 6 && isAgentLoading) ? 0.6 : 1.0)
 
             Button { toggleSpeakPrompt() } label: {
                 Image(systemName: isTTSBusy ? "stop.fill" : "speaker.wave.2.fill")
@@ -481,24 +570,46 @@ struct Onboarding: View {
             .background(Circle().fill(HVTheme.surfaceAlt))
             .overlay(Circle().stroke(HVTheme.stroke))
             .foregroundStyle(HVTheme.botText)
-            .disabled(!isTTSBusy && Date() < ttsCooldownUntil)
-            .opacity((!isTTSBusy && Date() < ttsCooldownUntil) ? 0.55 : 1.0)
+            .disabled(page == 6 && isAgentLoading)
+            .opacity((page == 6 && isAgentLoading) ? 0.6 : 1.0)
         }
-        .animation(.easeOut(duration: 0.25), value: canInteract)
-        .animation(.easeOut(duration: 0.2), value: isTTSBusy)
     }
 
-    // MARK: - Summary controls
+    // ======================================================
+    // MARK: Summary (page 7)
+    // ======================================================
 
-    private var summaryControls: some View {
-        HStack(spacing: 10) {
-            Button {
-                if isTTSBusy {
-                    tts.stop()
-                    markHeardIfNeeded()
-                } else {
-                    speakSummary()
+    private var summaryScrollableBlock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+
+            ScrollView(showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(typingText.isEmpty ? pagePrompt : typingText)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(HVTheme.botText)
+                        .lineSpacing(4)
+
+                    if !summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(typingTextForSummary.isEmpty ? summaryText : typingTextForSummary)
+                            .font(.body)
+                            .foregroundStyle(HVTheme.botText.opacity(0.95))
+                            .lineSpacing(4)
+                    } else if isSaving {
+                        HStack(spacing: 10) {
+                            ProgressView().scaleEffect(0.95)
+                            Text("Creating your summary…")
+                                .font(.footnote)
+                                .foregroundStyle(HVTheme.botText.opacity(0.75))
+                        }
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 260)
+
+            Button {
+                if isTTSBusy { tts.stop() }
+                else { tts.speak("\(summaryIntro)\n\n\(summaryText)", voice: selectedVoice) }
             } label: {
                 Label(isTTSBusy ? "Stop" : "Play", systemImage: isTTSBusy ? "stop.fill" : "speaker.wave.2.fill")
                     .font(.headline)
@@ -509,62 +620,12 @@ struct Onboarding: View {
             .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
             .foregroundStyle(HVTheme.botText)
-            .disabled(!isTTSBusy && Date() < ttsCooldownUntil)
-
-            if !canInteract {
-                HStack(spacing: 8) {
-                    ProgressView().scaleEffect(0.9)
-                    Text("Listening…")
-                        .font(.footnote)
-                        .foregroundStyle(HVTheme.botText.opacity(0.6))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
-                .transition(.opacity)
-            }
-        }
-        .animation(.easeOut(duration: 0.25), value: canInteract)
-    }
-
-    private func speakSummary() {
-        let now = Date()
-        if now < ttsCooldownUntil { return }
-        ttsCooldownUntil = now.addingTimeInterval(1.0)
-
-        stt.stop(commit: true) { finalText in
-            appendTranscriptToCurrentAnswer(finalText)
-        }
-
-        let combined = """
-        \(summaryIntro)
-
-        \(summaryText.trimmingCharacters(in: .whitespacesAndNewlines))
-        """
-        tts.speak(combined)
-    }
-
-    private func startSummaryTyping(_ text: String) {
-        summaryTypingTask?.cancel()
-        typingTextForSummary = ""
-
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
-
-        summaryTypingTask = Task {
-            try? await Task.sleep(nanoseconds: 140_000_000)
-            var buffer = ""
-            for ch in t {
-                if Task.isCancelled { return }
-                buffer.append(ch)
-                await MainActor.run { typingTextForSummary = buffer }
-                try? await Task.sleep(nanoseconds: 8_000_000)
-            }
         }
     }
 
-    // MARK: - Final choices
+    // ======================================================
+    // MARK: Final choices (page 8)
+    // ======================================================
 
     private var finalChoices: some View {
         VStack(spacing: 12) {
@@ -598,27 +659,24 @@ struct Onboarding: View {
             }
             .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.accent))
             .foregroundStyle(.white)
-
-            Text("You can re-run onboarding anytime from the top-right button in chat.")
-                .font(.footnote)
-                .foregroundStyle(HVTheme.botText.opacity(0.6))
-                .multilineTextAlignment(.center)
-                .padding(.top, 4)
         }
     }
 
-    // MARK: - Bottom bar
+    // ======================================================
+    // MARK: Bottom bar
+    // ======================================================
 
     private var bottomBar: some View {
         HStack(spacing: 12) {
 
-            if page > 0 && page != 6 {
+            if page > 0 && page != 8 {
                 Button {
-                    stt.stop(commit: true) { finalText in
-                        appendTranscriptToCurrentAnswer(finalText)
-                    }
                     tts.stop()
-                    page -= 1
+                    stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
+
+                    if page == 6 { page = 5 }
+                    else if page == 7 { page = 6 }
+                    else { page -= 1 }
                 } label: {
                     Text("Back")
                         .font(.headline)
@@ -628,98 +686,81 @@ struct Onboarding: View {
                 .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
                 .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
                 .foregroundStyle(HVTheme.botText)
+                .disabled(isAgentLoading || isSaving)
+                .opacity((isAgentLoading || isSaving) ? 0.6 : 1.0)
             }
 
-            if page != 6 {
+            if page != 8 {
                 Button {
                     Task { await nextTapped() }
                 } label: {
-                    Group {
-                        if isSaving {
-                            ProgressView().tint(.white)
-                        } else {
-                            Text(nextButtonTitle)
-                                .font(.headline)
-                        }
+                    if isSaving || (page == 6 && isAgentLoading) {
+                        ProgressView().tint(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    } else {
+                        Text(nextButtonTitle)
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
                 }
                 .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.accent))
                 .foregroundStyle(.white)
                 .disabled(nextDisabled)
-                .opacity((!canInteract && page != 0 && page != 5) ? 0.75 : 1.0)
+                .opacity(nextDisabled ? 0.7 : 1.0)
             } else {
                 RoundedRectangle(cornerRadius: 14)
                     .fill(Color.clear)
                     .frame(height: 46)
             }
         }
-        .animation(.spring(response: 0.45, dampingFraction: 0.9), value: canInteract)
-        .animation(.spring(response: 0.45, dampingFraction: 0.9), value: page)
     }
 
     private var nextButtonTitle: String {
         switch page {
-        case 4: return "Finish"
+        case 0: return "Next"
+        case 1: return "Continue"
         case 5: return "Continue"
+        case 7: return "Continue"
         default: return "Next"
         }
     }
 
     private var nextDisabled: Bool {
         if isSaving { return true }
-
-        if (1...4).contains(page) && !canInteract { return true }
-        if (1...4).contains(page) && currentAnswerIsEmpty { return true }
-
-        // While summary is generating, disable Continue
-        if page == 5 && summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isSaving {
-            return true
-        }
-
+        if page == 6 && isAgentLoading { return true }
+        if (2...6).contains(page) && currentAnswerIsEmpty { return true }
         return false
     }
 
-    // MARK: - Core flow
+    // ======================================================
+    // MARK: Page enter + typing + seeding
+    // ======================================================
 
     private func enterPage(_ newPage: Int, speak: Bool) {
         errorText = nil
-        appearTick += 1
 
-        stt.stop(commit: true) { finalText in
-            appendTranscriptToCurrentAnswer(finalText)
-        }
+        stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
         tts.stop()
 
-        startTyping(pagePrompt)
+        startTyping(pagePrompt.isEmpty ? " " : pagePrompt)
 
-        if newPage == 5 {
-            if !summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                startSummaryTyping(summaryText)
-            } else {
-                summaryTypingTask?.cancel()
-                typingTextForSummary = ""
-            }
+        if speak && newPage != 1 {
+            // Don’t auto-speak on voice picker page
+            playTTS(text: pagePrompt, bypassCooldown: true)
+        }
+
+        if newPage == 6 && !didSeedAgent {
+            didSeedAgent = true
+            Task { await seedAgent() }
+        }
+
+        if newPage == 7 {
+            if !summaryText.isEmpty { startSummaryTyping(summaryText) }
         } else {
             summaryTypingTask?.cancel()
             typingTextForSummary = ""
-        }
-
-        if speak {
-            playTTS(text: pagePrompt, bypassCooldown: true)
-
-            if newPage == 5, !summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    self.speakSummary()
-                }
-            }
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            if self.page == newPage, !self.canInteract {
-                self.hasHeardPage[newPage] = true
-            }
         }
     }
 
@@ -742,55 +783,57 @@ struct Onboarding: View {
         }
     }
 
+    private func startSummaryTyping(_ text: String) {
+        summaryTypingTask?.cancel()
+        typingTextForSummary = ""
+
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+
+        summaryTypingTask = Task {
+            try? await Task.sleep(nanoseconds: 140_000_000)
+            var buffer = ""
+            for ch in t {
+                if Task.isCancelled { return }
+                buffer.append(ch)
+                await MainActor.run { typingTextForSummary = buffer }
+                try? await Task.sleep(nanoseconds: 8_000_000)
+            }
+        }
+    }
+
     private func markHeardIfNeeded() {
         guard hasHeardPage.indices.contains(page) else { return }
         if !hasHeardPage[page] { hasHeardPage[page] = true }
     }
 
     private func toggleSpeakPrompt() {
-        if isTTSBusy {
-            tts.stop()
-            markHeardIfNeeded()
-            return
-        }
-        if page == 5 {
-            speakSummary()
-        } else {
-            playTTS(text: pagePrompt, bypassCooldown: false)
-        }
+        if isTTSBusy { tts.stop(); return }
+        playTTS(text: pagePrompt, bypassCooldown: false)
     }
 
     private func playTTS(text: String, bypassCooldown: Bool) {
         let now = Date()
         if !bypassCooldown && now < ttsCooldownUntil { return }
-        if !bypassCooldown {
-            ttsCooldownUntil = now.addingTimeInterval(1.0)
-        }
+        if !bypassCooldown { ttsCooldownUntil = now.addingTimeInterval(1.0) }
 
-        stt.stop(commit: true) { finalText in
-            appendTranscriptToCurrentAnswer(finalText)
-        }
-
+        stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
         tts.stop()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-            self.tts.speak(text)
+            self.tts.speak(text, voice: self.selectedVoice)
         }
     }
 
-    // MARK: - Mic / STT
+    // ======================================================
+    // MARK: Mic / STT
+    // ======================================================
 
     private func micTapped() async {
         errorText = nil
 
-        if !canInteract, hasHeardPage.indices.contains(page) {
-            hasHeardPage[page] = true
-        }
-
         if stt.isRecording {
-            stt.stop(commit: true) { finalText in
-                appendTranscriptToCurrentAnswer(finalText)
-            }
+            stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
             return
         }
 
@@ -806,12 +849,8 @@ struct Onboarding: View {
             return
         }
 
-        do {
-            try await stt.start()
-        } catch {
-            print("❌ STT start error: \(error)")
-            errorText = "Could not start recording."
-        }
+        do { try await stt.start() }
+        catch { errorText = "Could not start recording." }
     }
 
     private func requestPermissions() async {
@@ -822,11 +861,7 @@ struct Onboarding: View {
                 cont.resume(returning: granted)
             }
         }
-
-        guard micGranted else {
-            permissionDenied = true
-            return
-        }
+        guard micGranted else { permissionDenied = true; return }
 
         let speechStatus: SFSpeechRecognizerAuthorizationStatus =
         await withCheckedContinuation { cont in
@@ -834,10 +869,7 @@ struct Onboarding: View {
                 cont.resume(returning: status)
             }
         }
-
-        if speechStatus != .authorized {
-            permissionDenied = true
-        }
+        if speechStatus != .authorized { permissionDenied = true }
     }
 
     private func stopTTSAndWait() async {
@@ -847,13 +879,12 @@ struct Onboarding: View {
             if !(tts.isPlaying || tts.isLoading) { break }
             try? await Task.sleep(nanoseconds: 35_000_000)
         }
-
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 
-    private func appendTranscriptToCurrentAnswer(_ heard: String) {
+    private func appendTranscriptToAnswer(_ heard: String) {
         let finalText = heard.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (1...4).contains(page), !finalText.isEmpty else { return }
+        guard !finalText.isEmpty else { return }
 
         var current = currentAnswerBinding.wrappedValue
         if current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -865,60 +896,181 @@ struct Onboarding: View {
         currentAnswerBinding.wrappedValue = current
     }
 
-    // MARK: - Next / Submit / Summary
+    // ======================================================
+    // MARK: Flow: Next
+    // ======================================================
 
     private func nextTapped() async {
         errorText = nil
+        stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
 
-        stt.stop(commit: true) { finalText in
-            appendTranscriptToCurrentAnswer(finalText)
-        }
-
+        // Intro -> Voice
         if page == 0 {
             page = 1
             return
         }
 
-        if (1...3).contains(page) {
-            guard canInteract else { return }
+        // Voice -> Q1 (lock voice choice)
+        if page == 1 {
+            hasChosenVoice = true
+            page = 2
+            return
+        }
+
+        // Standard Qs 2..4 -> next
+        if (2...4).contains(page) {
             guard !currentAnswerIsEmpty else { return }
             page += 1
             return
         }
 
-        if page == 4 {
-            guard canInteract else { return }
-            guard allAnswersFilled else {
-                errorText = "Please answer all questions before finishing."
+        // After Q4 (page 5) -> Agent follow-ups (page 6)
+        if page == 5 {
+            guard allStandardAnswersFilled else {
+                errorText = "Please answer all questions before continuing."
                 return
             }
-
-            isSaving = true
-            do {
-                try await submitAllAnswersOnce()
-
-                let summary = try await fetchInvestorSummary()
-                summaryText = summary
-                persistState()
-
-                page = 5
-            } catch let e as NSError {
-                let msg = (e.userInfo[NSLocalizedDescriptionKey] as? String) ?? e.localizedDescription
-                errorText = "Could not save. (\(e.code)) \(msg)"
-            } catch {
-                errorText = "Could not save. Please try again."
-            }
-            isSaving = false
-            return
-        }
-
-        if page == 5 {
-            done = true
+            // Reset agent state fresh
+            agentPrompt = ""
+            agentAnswer = ""
+            agentQuestionsAsked = 1
+            didSeedAgent = false
             persistState()
+
             page = 6
             return
         }
+
+        // Agent follow-ups (page 6)
+        if page == 6 {
+            let userText = agentAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !userText.isEmpty else { return }
+
+            agentAnswer = ""            // clear input immediately
+            isAgentLoading = true       // show loader immediately
+
+            do {
+                let result = try await callOnboardingAgent(userText: userText)
+                agentQuestionsAsked += 1
+                persistState()
+
+                if result.nextAction == "redirect" {
+                    // IMPORTANT: do NOT show any “enough info” message.
+                    // Jump directly to summary and show your custom intro + summary.
+                    isSaving = true
+                    try await submitAllAnswersOnce()
+                    let summary = try await fetchInvestorSummary()
+                    summaryText = summary
+                    persistState()
+                    isSaving = false
+
+                    isAgentLoading = false
+                    page = 7
+                    return
+                }
+
+                // Continue: update prompt to the next question
+                agentPrompt = result.assistant
+                startTyping(agentPrompt)
+                tts.speak(agentPrompt, voice: selectedVoice)
+
+                isAgentLoading = false
+                return
+
+            } catch {
+                isAgentLoading = false
+                errorText = "Agent error: \(error.localizedDescription)"
+                return
+            }
+        }
+
+        // Summary -> Final
+        if page == 7 {
+            done = true
+            persistState()
+            page = 8
+            return
+        }
     }
+
+    // ======================================================
+    // MARK: Agent Seed (no filler, direct next question)
+    // ======================================================
+
+    private func seedAgent() async {
+        // show loader while we fetch the first follow-up question
+        isAgentLoading = true
+        defer { isAgentLoading = false }
+
+        // Send the 4 standard answers as context
+        let context = """
+        My net worth: \(answers[0])
+        My investment goals/plans: \(answers[1])
+        Health help: \(answers[2])
+        Wealth help: \(answers[3])
+        """
+
+        do {
+            let result = try await callOnboardingAgent(userText: context)
+            agentQuestionsAsked += 1
+            persistState()
+
+            // If backend says redirect immediately (rare), still go to summary
+            if result.nextAction == "redirect" {
+                isSaving = true
+                try await submitAllAnswersOnce()
+                let summary = try await fetchInvestorSummary()
+                summaryText = summary
+                persistState()
+                isSaving = false
+                page = 7
+                return
+            }
+
+            agentPrompt = result.assistant
+            startTyping(agentPrompt)
+            tts.speak(agentPrompt, voice: selectedVoice)
+
+        } catch {
+            errorText = "Agent error: \(error.localizedDescription)"
+        }
+    }
+
+    private func callOnboardingAgent(userText: String) async throws -> (assistant: String, nextAction: String) {
+        guard let url = URL(string: "\(HushhAPI.base)/onboarding/agent") else {
+            throw URLError(.badURL)
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let payload: [String: Any] = [
+            "client_user_id": userID,
+            "questions_asked": agentQuestionsAsked,
+            "user_text": userText
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(domain: "OnboardingAgent", code: http.statusCode,
+                          userInfo: [NSLocalizedDescriptionKey: body])
+        }
+
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let dataObj = json?["data"] as? [String: Any]
+        let assistant = (dataObj?["assistant_text"] as? String) ?? "Got it — what should we fill next?"
+        let nextAction = (dataObj?["next_action"] as? String) ?? "continue"
+        return (assistant, nextAction)
+    }
+
+    // ======================================================
+    // MARK: Submit standard answers to Supabase
+    // ======================================================
 
     private func submitAllAnswersOnce() async throws {
         guard let url = URL(string: "\(SB_URL)/rest/v1/\(SB_TABLE)") else {
@@ -946,12 +1098,14 @@ struct Onboarding: View {
 
         if !(200..<300).contains(http.statusCode) {
             let body = String(data: data, encoding: .utf8) ?? "(non-utf8 body)"
-            print("❌ Supabase FINAL write failed")
-            print("❌ status: \(http.statusCode)")
-            print("❌ body: \(body)")
-            throw NSError(domain: "Onboarding", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: body])
+            throw NSError(domain: "Onboarding", code: http.statusCode,
+                          userInfo: [NSLocalizedDescriptionKey: body])
         }
     }
+
+    // ======================================================
+    // MARK: Summary generation (uses /siri/ask)
+    // ======================================================
 
     private func fetchInvestorSummary() async throws -> String {
         let token = await google.ensureValidAccessToken()
@@ -988,7 +1142,6 @@ struct Onboarding: View {
 
         var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Enforce max 6 lines
         let lines = cleaned
             .split(separator: "\n", omittingEmptySubsequences: true)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -998,10 +1151,9 @@ struct Onboarding: View {
         }
 
         if cleaned.isEmpty {
-            return """
-            Here’s what I understood:
-            Your net worth sets your current financial baseline.
-            Your investment goals show what you want to achieve next.
+            cleaned = """
+            Your net worth gives your current baseline.
+            Your goals show what you want to achieve next.
             You shared the kind of health support you’re looking for.
             You shared the wealth support you want right now.
             I’ll personalize your next steps based on this.
@@ -1012,8 +1164,9 @@ struct Onboarding: View {
     }
 }
 
-// MARK: - OnboardingTTSManager
-// Fixes the mic bug by cancelling in-flight backend TTS and ignoring late results.
+// ======================================================
+// MARK: - OnboardingTTSManager (voice param)
+// ======================================================
 
 @MainActor
 final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate {
@@ -1032,7 +1185,7 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
         synth.delegate = self
     }
 
-    func speak(_ text: String) {
+    func speak(_ text: String, voice: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -1050,7 +1203,7 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
             self.configureAudioSessionForTTS()
 
             do {
-                let audioData = try await HushhAPI.tts(text: trimmed, voice: "alloy")
+                let audioData = try await HushhAPI.tts(text: trimmed, voice: voice)
                 if Task.isCancelled { return }
                 guard self.activeToken == token else { return }
 
@@ -1064,7 +1217,7 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
                 p.play()
                 return
             } catch {
-                // fall back
+                // fallback to system voice
             }
 
             if Task.isCancelled { return }
@@ -1074,9 +1227,7 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
             self.isPlaying = true
 
             let utterance = AVSpeechUtterance(string: trimmed)
-            if let voice = AVSpeechSynthesisVoice(language: "en-US") {
-                utterance.voice = voice
-            }
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
             utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
             self.synth.speak(utterance)
         }
@@ -1100,13 +1251,8 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
         deactivateAudioSession()
     }
 
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        stop()
-    }
-
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        stop()
-    }
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { stop() }
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) { stop() }
 
     private func configureAudioSessionForTTS() {
         do {
@@ -1124,7 +1270,9 @@ final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDeleg
     }
 }
 
-// MARK: - STTController (fresh AVAudioEngine per start)
+// ======================================================
+// MARK: - STTController (fix “Cannot find in scope”)
+// ======================================================
 
 @MainActor
 final class STTController: ObservableObject {
@@ -1141,7 +1289,7 @@ final class STTController: ObservableObject {
     }
 
     func start() async throws {
-        stop(commit: false, onFinal: { _ in })
+        stop(commit: false) { _ in }
 
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
@@ -1183,7 +1331,7 @@ final class STTController: ObservableObject {
 
             if error != nil {
                 Task { @MainActor in
-                    self.stop(commit: true, onFinal: { _ in })
+                    self.stop(commit: true) { _ in }
                 }
             }
         }
@@ -1194,9 +1342,7 @@ final class STTController: ObservableObject {
 
         let final = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if let engine = audioEngine, engine.isRunning {
-            engine.stop()
-        }
+        if let engine = audioEngine, engine.isRunning { engine.stop() }
         audioEngine?.inputNode.removeTap(onBus: 0)
 
         request?.endAudio()
@@ -1208,10 +1354,7 @@ final class STTController: ObservableObject {
 
         isRecording = false
 
-        if commit, !final.isEmpty {
-            onFinal(final)
-        }
-
+        if commit, !final.isEmpty { onFinal(final) }
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 }
