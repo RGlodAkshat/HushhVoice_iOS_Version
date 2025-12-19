@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C62312D62EF2CE5B005EF74D /* SignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = C62312D52EF2CE52005EF74D /* SignIn.swift */; };
 		C667B6372EAE825C00FD00D6 /* HushhVoiceApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C667B6362EAE825C00FD00D6 /* HushhVoiceApp.swift */; };
 		C667B6392EAE825C00FD00D6 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C667B6382EAE825C00FD00D6 /* ContentView.swift */; };
 		C667B63B2EAE825D00FD00D6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C667B63A2EAE825D00FD00D6 /* Assets.xcassets */; };
@@ -16,8 +17,6 @@
 		C6AD31012EED888800A50130 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31002EED888800A50130 /* PostgREST */; };
 		C6AD31032EED888800A50130 /* Realtime in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31022EED888800A50130 /* Realtime */; };
 		C6AD31052EED888800A50130 /* Storage in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31042EED888800A50130 /* Storage */; };
-		C6AD310C2EED910F00A50130 /* SupabaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6AD310B2EED910700A50130 /* SupabaseManager.swift */; };
-		C6AD310E2EED914000A50130 /* AppleSupabaseAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6AD310D2EED913C00A50130 /* AppleSupabaseAuth.swift */; };
 		C6AD31102EED956B00A50130 /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD310F2EED956B00A50130 /* Auth */; };
 		C6AD31122EED956B00A50130 /* Functions in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31112EED956B00A50130 /* Functions */; };
 		C6AD31142EED956B00A50130 /* PostgREST in Frameworks */ = {isa = PBXBuildFile; productRef = C6AD31132EED956B00A50130 /* PostgREST */; };
@@ -28,6 +27,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		C62312D52EF2CE52005EF74D /* SignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignIn.swift; sourceTree = "<group>"; };
 		C65190D72EB2228B00B45989 /* HushhVoice.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HushhVoice.entitlements; sourceTree = "<group>"; };
 		C667B6332EAE825C00FD00D6 /* HushhVoice.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HushhVoice.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C667B6362EAE825C00FD00D6 /* HushhVoiceApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HushhVoiceApp.swift; sourceTree = "<group>"; };
@@ -35,8 +35,6 @@
 		C667B63A2EAE825D00FD00D6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C667B63D2EAE825D00FD00D6 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		C6AD310A2EED8CE000A50130 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		C6AD310B2EED910700A50130 /* SupabaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseManager.swift; sourceTree = "<group>"; };
-		C6AD310D2EED913C00A50130 /* AppleSupabaseAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSupabaseAuth.swift; sourceTree = "<group>"; };
 		C6AD31262EEE7CF100A50130 /* Onboarding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Onboarding.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -82,12 +80,11 @@
 		C667B6352EAE825C00FD00D6 /* HushhVoice */ = {
 			isa = PBXGroup;
 			children = (
+				C62312D52EF2CE52005EF74D /* SignIn.swift */,
 				C6AD31262EEE7CF100A50130 /* Onboarding.swift */,
-				C6AD310D2EED913C00A50130 /* AppleSupabaseAuth.swift */,
-				C6AD310B2EED910700A50130 /* SupabaseManager.swift */,
+				C667B6362EAE825C00FD00D6 /* HushhVoiceApp.swift */,
 				C6AD310A2EED8CE000A50130 /* Info.plist */,
 				C65190D72EB2228B00B45989 /* HushhVoice.entitlements */,
-				C667B6362EAE825C00FD00D6 /* HushhVoiceApp.swift */,
 				C667B6382EAE825C00FD00D6 /* ContentView.swift */,
 				C667B63A2EAE825D00FD00D6 /* Assets.xcassets */,
 				C667B63C2EAE825D00FD00D6 /* Preview Content */,
@@ -183,11 +180,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C6AD310C2EED910F00A50130 /* SupabaseManager.swift in Sources */,
 				C667B6392EAE825C00FD00D6 /* ContentView.swift in Sources */,
 				C6AD31272EEE7CFD00A50130 /* Onboarding.swift in Sources */,
-				C6AD310E2EED914000A50130 /* AppleSupabaseAuth.swift in Sources */,
 				C667B6372EAE825C00FD00D6 /* HushhVoiceApp.swift in Sources */,
+				C62312D62EF2CE5B005EF74D /* SignIn.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -320,7 +316,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = HushhVoice/HushhVoice.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_ASSET_PATHS = "\"HushhVoice/Preview Content\"";
 				DEVELOPMENT_TEAM = WVDK9JW99C;
 				ENABLE_PREVIEWS = YES;
@@ -338,7 +334,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "https---www.hushh.ai.HushhVoice";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -354,7 +350,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = HushhVoice/HushhVoice.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_ASSET_PATHS = "\"HushhVoice/Preview Content\"";
 				DEVELOPMENT_TEAM = WVDK9JW99C;
 				ENABLE_PREVIEWS = YES;
@@ -372,7 +368,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "https---www.hushh.ai.HushhVoice";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
