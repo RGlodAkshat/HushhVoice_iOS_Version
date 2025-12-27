@@ -9,10 +9,7 @@
 //   6) Agent follow-ups using /onboarding/agent (EXACT SAME UI as questions)
 //        - loader while waiting
 //        - no “handoff” filler line
-//   7) Summary screen (Thanks + summary)
-//        - do NOT show “enough info to prefill…”
-//        - jump straight to summary when backend returns redirect
-//   8) Final choices
+//   7) Structured summary table (review + edit or confirm)
 //
 //  NOTE:
 //  - This file includes STTController + OnboardingTTSManager so “Cannot find STTController” won’t happen.
@@ -55,7 +52,7 @@ struct Onboarding: View {
     @ObservedObject private var google = GoogleSignInManager.shared
 
     // Pages:
-    // 0=intro, 1=voice, 2..5=standard Qs, 6=agent Qs, 7=summary, 8=final
+    // 0=intro, 1=voice, 2..5=standard Qs, 6=agent Qs, 7=summary
     @State private var page: Int = 0
     @State private var didInitialRestore: Bool = false
 
@@ -67,9 +64,15 @@ struct Onboarding: View {
     @State private var agentAnswer: String = ""
     @State private var agentQuestionsAsked: Int = 1
     @State private var didSeedAgent: Bool = false
+    @State private var agentPrompts: [String] = []
+    @State private var currentAgentQuestionIndex: Int = 0
 
     // Summary
     @State private var summaryText: String = ""
+    @State private var answersByStepId: [Int: String] = [:]
+    @State private var questionByStepId: [Int: String] = [:]
+    @State private var submittedAnswers: [Int: String] = [:]
+    @State private var currentStepIndex: Int = 0
 
     // Permissions
     @State private var permissionDenied: Bool = false
@@ -85,7 +88,7 @@ struct Onboarding: View {
     @State private var typingTask: Task<Void, Never>?
 
     // Gate interaction until prompt heard once
-    @State private var hasHeardPage: [Bool] = Array(repeating: false, count: 9)
+    @State private var hasHeardPage: [Bool] = Array(repeating: false, count: 8)
     @State private var ttsCooldownUntil: Date = .distantPast
 
     // STT + TTS
@@ -136,10 +139,20 @@ struct Onboarding: View {
         case 2...5: return questions[page - 2]
         case 6:
             // IMPORTANT: no filler line — either show current agent prompt or nothing while loading
-            return agentPrompt
+            return currentAgentPrompt
         case 7: return summaryIntro
         default: return "All set. Choose what you want to do next."
         }
+    }
+
+    private var currentAgentPrompt: String {
+        if agentPrompts.indices.contains(currentAgentQuestionIndex) {
+            return agentPrompts[currentAgentQuestionIndex]
+        }
+        if let cached = questionByStepId[6 + currentAgentQuestionIndex] {
+            return cached
+        }
+        return agentPrompt
     }
 
     private var isTTSBusy: Bool { tts.isPlaying || tts.isLoading }
@@ -152,12 +165,19 @@ struct Onboarding: View {
         Binding(
             get: {
                 if (2...5).contains(page) { return answers[page - 2] }
-                if page == 6 { return agentAnswer }
+                if page == 6 {
+                    let stepId = 6 + currentAgentQuestionIndex
+                    return answersByStepId[stepId] ?? agentAnswer
+                }
                 return ""
             },
             set: { newValue in
                 if (2...5).contains(page) { answers[page - 2] = newValue }
-                if page == 6 { agentAnswer = newValue }
+                if page == 6 {
+                    agentAnswer = newValue
+                    let stepId = 6 + currentAgentQuestionIndex
+                    answersByStepId[stepId] = newValue
+                }
             }
         )
     }
@@ -167,7 +187,9 @@ struct Onboarding: View {
             return answers[page - 2].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if page == 6 {
-            return agentAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let stepId = 6 + currentAgentQuestionIndex
+            let text = answersByStepId[stepId] ?? agentAnswer
+            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         return false
     }
@@ -220,11 +242,23 @@ struct Onboarding: View {
         .onAppear { restoreState() }
         .onChange(of: page) { _, newPage in
             if didInitialRestore {
+                currentStepIndex = newPage
                 persistState()
                 enterPage(newPage, speak: true)
             }
         }
-        .onChange(of: answers) { _, _ in if didInitialRestore { persistState() } }
+        .onChange(of: currentStepIndex) { _, newPage in
+            if page != newPage {
+                page = newPage
+            }
+        }
+        .onChange(of: answers) { _, newValue in
+            answersByStepId[2] = newValue[0]
+            answersByStepId[3] = newValue[1]
+            answersByStepId[4] = newValue[2]
+            answersByStepId[5] = newValue[3]
+            if didInitialRestore { persistState() }
+        }
         .onChange(of: agentPrompt) { _, _ in if didInitialRestore { persistState() } }
         .onChange(of: summaryText) { _, _ in if didInitialRestore { persistState() } }
         .onChange(of: tts.isPlaying) { _, playing in if !playing { markHeardIfNeeded() } }
@@ -246,9 +280,21 @@ struct Onboarding: View {
         summaryText = savedSummary
         agentQuestionsAsked = max(1, savedAgentQCount)
         agentPrompt = savedAgentPrompt
+        answersByStepId = [
+            2: a0,
+            3: a1,
+            4: a2,
+            5: a3
+        ]
+        if !savedAgentPrompt.isEmpty {
+            agentPrompts = [savedAgentPrompt]
+            questionByStepId[6] = savedAgentPrompt
+            didSeedAgent = true
+        }
+        currentStepIndex = page
 
         if done {
-            page = 8
+            page = 7
         } else {
             // Always show intro first after sign-in
             // then voice, then questions...
@@ -337,7 +383,7 @@ struct Onboarding: View {
                 if (2...5).contains(page) {
                     progressPills(current: page - 1, total: 4)
                 } else if page == 6 {
-                    Text("Step 6 of 8")
+                    Text("Step 6 of 7")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(HVTheme.botText.opacity(0.7))
                         .padding(.vertical, 6)
@@ -345,7 +391,7 @@ struct Onboarding: View {
                         .background(RoundedRectangle(cornerRadius: 12).fill(HVTheme.surfaceAlt))
                         .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
                 } else if page == 7 {
-                    Text("Step 7 of 8")
+                    Text("Step 7 of 7")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(HVTheme.botText.opacity(0.7))
                         .padding(.vertical, 6)
@@ -358,7 +404,7 @@ struct Onboarding: View {
             if page == 1 {
                 voicePickerBlock
             } else if page == 7 {
-                summaryScrollableBlock
+                summaryTableBlock
             } else {
                 // Prompt text
                 Text(typingText.isEmpty ? pagePrompt : typingText)
@@ -384,8 +430,6 @@ struct Onboarding: View {
                 } else if (2...6).contains(page) {
                     answerBox
                     controlsRow
-                } else if page == 8 {
-                    finalChoices
                 }
             }
         }
@@ -579,86 +623,81 @@ struct Onboarding: View {
     // MARK: Summary (page 7)
     // ======================================================
 
-    private var summaryScrollableBlock: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private var summaryTableBlock: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Review your details")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(HVTheme.botText)
 
-            ScrollView(showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(typingText.isEmpty ? pagePrompt : typingText)
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(HVTheme.botText)
-                        .lineSpacing(4)
+            VStack(alignment: .leading, spacing: 10) {
+                summaryRow(label: "Net worth", value: answers[0])
+                summaryRow(label: "Investment goals/plans", value: answers[1])
+                summaryRow(label: "Health help", value: answers[2])
+                summaryRow(label: "Wealth help", value: answers[3])
 
-                    if !summaryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(typingTextForSummary.isEmpty ? summaryText : typingTextForSummary)
-                            .font(.body)
-                            .foregroundStyle(HVTheme.botText.opacity(0.95))
-                            .lineSpacing(4)
-                    } else if isSaving {
-                        HStack(spacing: 10) {
-                            ProgressView().scaleEffect(0.95)
-                            Text("Creating your summary…")
-                                .font(.footnote)
-                                .foregroundStyle(HVTheme.botText.opacity(0.75))
-                        }
-                    }
+                let agentEntries = answersByStepId
+                    .filter { $0.key >= 6 }
+                    .sorted { $0.key < $1.key }
+
+                ForEach(Array(agentEntries.enumerated()), id: \.element.key) { idx, entry in
+                    summaryRow(label: "Follow-up \(idx + 1)", value: entry.value)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxHeight: 260)
-
-            Button {
-                if isTTSBusy { tts.stop() }
-                else { tts.speak("\(summaryIntro)\n\n\(summaryText)", voice: selectedVoice) }
-            } label: {
-                Label(isTTSBusy ? "Stop" : "Play", systemImage: isTTSBusy ? "stop.fill" : "speaker.wave.2.fill")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            }
-            .buttonStyle(.plain)
+            .padding(12)
             .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
-            .foregroundStyle(HVTheme.botText)
+
+            if let errorText {
+                Text(errorText)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+
+            HStack(spacing: 12) {
+                Button {
+                    page = 2
+                    currentAgentQuestionIndex = 0
+                } label: {
+                    Text("Edit Answers")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
+                .foregroundStyle(HVTheme.botText)
+
+                Button {
+                    confirmAndFinish()
+                } label: {
+                    if isSaving {
+                        ProgressView().tint(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    } else {
+                        Text("Confirm & Finish")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.accent))
+                .foregroundStyle(.white)
+                .disabled(isSaving)
+            }
         }
     }
 
-    // ======================================================
-    // MARK: Final choices (page 8)
-    // ======================================================
-
-    private var finalChoices: some View {
-        VStack(spacing: 12) {
-            Text("Your investor profile is saved.")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(HVTheme.botText.opacity(0.9))
-
-            Button {
-                if let url = URL(string: "https://www.hushhtech.com/") { openURL(url) }
-            } label: {
-                HStack {
-                    Image(systemName: "link")
-                    Text("Go to HushhTech")
-                }
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-            }
-            .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
-            .foregroundStyle(HVTheme.botText)
-
-            Button { dismiss() } label: {
-                HStack {
-                    Image(systemName: "message.fill")
-                    Text("Continue HushhVoice")
-                }
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-            }
-            .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.accent))
-            .foregroundStyle(.white)
+    private func summaryRow(label: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(label)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(HVTheme.botText.opacity(0.75))
+                .frame(width: 140, alignment: .leading)
+            Text(value.isEmpty ? "Not provided" : value)
+                .font(.body)
+                .foregroundStyle(HVTheme.botText)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -669,14 +708,25 @@ struct Onboarding: View {
     private var bottomBar: some View {
         HStack(spacing: 12) {
 
-            if page > 0 && page != 8 {
+            if page > 0 {
                 Button {
                     tts.stop()
                     stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
 
-                    if page == 6 { page = 5 }
-                    else if page == 7 { page = 6 }
-                    else { page -= 1 }
+                    if page == 6 {
+                        if currentAgentQuestionIndex > 0 {
+                            currentAgentQuestionIndex -= 1
+                            agentAnswer = answersByStepId[6 + currentAgentQuestionIndex] ?? ""
+                        } else {
+                            page = 5
+                        }
+                    } else if page == 7 {
+                        page = 6
+                        currentAgentQuestionIndex = max(agentPrompts.count - 1, 0)
+                        agentAnswer = answersByStepId[6 + currentAgentQuestionIndex] ?? ""
+                    } else {
+                        page -= 1
+                    }
                 } label: {
                     Text("Back")
                         .font(.headline)
@@ -690,9 +740,13 @@ struct Onboarding: View {
                 .opacity((isAgentLoading || isSaving) ? 0.6 : 1.0)
             }
 
-            if page != 8 {
+            if page <= 7 {
                 Button {
-                    Task { await nextTapped() }
+                    if page == 7 {
+                        confirmAndFinish()
+                    } else {
+                        Task { await nextTapped() }
+                    }
                 } label: {
                     if isSaving || (page == 6 && isAgentLoading) {
                         ProgressView().tint(.white)
@@ -709,10 +763,6 @@ struct Onboarding: View {
                 .foregroundStyle(.white)
                 .disabled(nextDisabled)
                 .opacity(nextDisabled ? 0.7 : 1.0)
-            } else {
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(Color.clear)
-                    .frame(height: 46)
             }
         }
     }
@@ -722,7 +772,7 @@ struct Onboarding: View {
         case 0: return "Next"
         case 1: return "Continue"
         case 5: return "Continue"
-        case 7: return "Continue"
+        case 7: return "Confirm & Finish"
         default: return "Next"
         }
     }
@@ -935,6 +985,8 @@ struct Onboarding: View {
             agentAnswer = ""
             agentQuestionsAsked = 1
             didSeedAgent = false
+            agentPrompts.removeAll()
+            currentAgentQuestionIndex = 0
             persistState()
 
             page = 6
@@ -943,20 +995,37 @@ struct Onboarding: View {
 
         // Agent follow-ups (page 6)
         if page == 6 {
-            let userText = agentAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !userText.isEmpty else { return }
+            let stepId = 6 + currentAgentQuestionIndex
+            let currentAnswer = (answersByStepId[stepId] ?? agentAnswer)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !currentAnswer.isEmpty else { return }
+
+            let hasCachedNext = (currentAgentQuestionIndex + 1) < agentPrompts.count
+            let answerChanged = submittedAnswers[stepId] != currentAnswer
+
+            if hasCachedNext && !answerChanged {
+                currentAgentQuestionIndex += 1
+                agentAnswer = answersByStepId[6 + currentAgentQuestionIndex] ?? ""
+                return
+            }
+
+            if answerChanged {
+                agentPrompts = Array(agentPrompts.prefix(currentAgentQuestionIndex + 1))
+                let keepSteps = Set((0...currentAgentQuestionIndex).map { 6 + $0 })
+                answersByStepId = answersByStepId.filter { keepSteps.contains($0.key) || $0.key < 6 }
+                submittedAnswers = submittedAnswers.filter { keepSteps.contains($0.key) }
+            }
 
             agentAnswer = ""            // clear input immediately
             isAgentLoading = true       // show loader immediately
 
             do {
-                let result = try await callOnboardingAgent(userText: userText)
-                agentQuestionsAsked += 1
+                let result = try await callOnboardingAgent(userText: currentAnswer)
+                submittedAnswers[stepId] = currentAnswer
+                agentQuestionsAsked = agentPrompts.count + 1
                 persistState()
 
                 if result.nextAction == "redirect" {
-                    // IMPORTANT: do NOT show any “enough info” message.
-                    // Jump directly to summary and show your custom intro + summary.
                     isSaving = true
                     try await submitAllAnswersOnce()
                     let summary = try await fetchInvestorSummary()
@@ -969,10 +1038,16 @@ struct Onboarding: View {
                     return
                 }
 
-                // Continue: update prompt to the next question
-                agentPrompt = result.assistant
-                startTyping(agentPrompt)
-                tts.speak(agentPrompt, voice: selectedVoice)
+                // Continue: cache next prompt and move forward without re-calling unless changed
+                let newPrompt = result.assistant
+                agentPrompt = newPrompt
+                agentPrompts.append(newPrompt)
+                let nextStepId = 6 + (agentPrompts.count - 1)
+                questionByStepId[nextStepId] = newPrompt
+                currentAgentQuestionIndex = agentPrompts.count - 1
+                agentAnswer = answersByStepId[nextStepId] ?? ""
+                startTyping(newPrompt)
+                tts.speak(newPrompt, voice: selectedVoice)
 
                 isAgentLoading = false
                 return
@@ -986,11 +1061,17 @@ struct Onboarding: View {
 
         // Summary -> Final
         if page == 7 {
-            done = true
-            persistState()
-            page = 8
+            confirmAndFinish()
             return
         }
+    }
+
+    private func confirmAndFinish() {
+        done = true
+        persistState()
+        tts.stop()
+        stt.stop(commit: true) { _ in }
+        dismiss()
     }
 
     // ======================================================
@@ -1028,6 +1109,10 @@ struct Onboarding: View {
             }
 
             agentPrompt = result.assistant
+            agentPrompts = [result.assistant]
+            questionByStepId[6] = result.assistant
+            currentAgentQuestionIndex = 0
+            agentAnswer = answersByStepId[6] ?? ""
             startTyping(agentPrompt)
             tts.speak(agentPrompt, voice: selectedVoice)
 
@@ -1045,9 +1130,10 @@ struct Onboarding: View {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        let askedCount = max(agentPrompts.count, agentQuestionsAsked)
         let payload: [String: Any] = [
             "client_user_id": userID,
-            "questions_asked": agentQuestionsAsked,
+            "questions_asked": askedCount,
             "user_text": userText
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)

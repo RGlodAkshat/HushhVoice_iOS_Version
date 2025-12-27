@@ -196,6 +196,26 @@ enum HushhAPI {
 
         return data
     }
+
+    static func deleteAccount(googleToken: String?, appleUserID: String?) async throws {
+        var req = URLRequest(url: base.appendingPathComponent("/account/delete"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        var payload: [String: Any] = [:]
+        if let googleToken { payload["google_access_token"] = googleToken }
+        if let appleUserID, !appleUserID.isEmpty { payload["apple_user_id"] = appleUserID }
+
+        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard (200..<300).contains(http.statusCode) else {
+            let msg = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+            throw NSError(domain: "HushhAPI.DeleteAccount", code: http.statusCode,
+                          userInfo: [NSLocalizedDescriptionKey: msg])
+        }
+    }
 }
 
 // ======================================================
@@ -208,6 +228,10 @@ final class GoogleSignInManager: NSObject, ObservableObject {
 
     @Published var isSignedIn: Bool = false
     @Published var accessToken: String? = nil
+
+    var hasConnectedGoogle: Bool {
+        isSignedIn || accessToken != nil || defaults.string(forKey: tokenKey) != nil
+    }
 
     private let tokenKey = "google_access_token"
     private let refreshTokenKey = "google_refresh_token"
@@ -246,6 +270,16 @@ final class GoogleSignInManager: NSObject, ObservableObject {
         defaults.removeObject(forKey: tokenKey)
         defaults.removeObject(forKey: refreshTokenKey)
         defaults.removeObject(forKey: expiryKey)
+    }
+
+    func disconnect() async {
+        let tokenToRevoke = accessToken ?? defaults.string(forKey: tokenKey)
+        if let tokenToRevoke, let url = URL(string: "https://oauth2.googleapis.com/revoke?token=\(tokenToRevoke)") {
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            _ = try? await URLSession.shared.data(for: req)
+        }
+        signOut()
     }
 
     private var storedRefreshToken: String? { defaults.string(forKey: refreshTokenKey) }
@@ -496,7 +530,7 @@ extension GoogleSignInManager: ASWebAuthenticationPresentationContextProviding {
 
 // ======================================================
 // MARK: - SPEECH MANAGER (TTS + Stop + State)
-// ======================================================
+// ===================================================
 
 final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate {
     static let shared = SpeechManager()
@@ -1372,6 +1406,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) var dismiss
     @Binding var isDarkMode: Bool
     @ObservedObject var google: GoogleSignInManager
+    @Binding var isGuest: Bool
 
     @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
     @State private var showHelpSheet: Bool = false
@@ -1385,22 +1420,47 @@ struct SettingsView: View {
                     Toggle(isOn: $isDarkMode) { Text("Dark Mode") }
                 }
 
-                Section("Accounts") {
+                Section("Integrations") {
                     HStack {
                         Text("Google")
                         Spacer()
-                        Text(google.isSignedIn ? "Connected" : "Not Connected")
-                            .foregroundStyle(google.isSignedIn ? .green : .secondary)
+                        Text(google.hasConnectedGoogle ? "Connected" : "Not Connected")
+                            .foregroundStyle(google.hasConnectedGoogle ? .green : .secondary)
                             .font(.footnote)
                     }
 
                     Button { google.signIn() } label: {
                         HStack {
                             Image(systemName: "envelope.circle.fill")
-                            Text(google.isSignedIn ? "Reconnect Google" : "Sign in with Google")
+                            Text(google.hasConnectedGoogle ? "Reconnect Google" : "Sign in with Google")
                         }
                     }
 
+                    Button(role: .destructive) {
+                        Task { await google.disconnect() }
+                    } label: {
+                        HStack {
+                            Image(systemName: "xmark.circle.fill")
+                            Text("Disconnect Google")
+                        }
+                    }
+                    .disabled(!google.hasConnectedGoogle)
+                }
+
+                if isGuest {
+                    Section {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Sign in to unlock integrations and sync")
+                                .font(.headline)
+                            Text("Connect Google or Apple to sync data and enable Gmail/Calendar features.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+
+                Section("Accounts") {
                     HStack {
                         Text(appleUserID.isEmpty ? "Not Linked" : "Linked")
                             .foregroundColor(appleUserID.isEmpty ? .secondary : .green)
@@ -1426,6 +1486,18 @@ struct SettingsView: View {
                     } label: {
                         Text("Sign out of HushhVoice")
                     }
+
+                    if !isGuest {
+                        NavigationLink {
+                            DeleteAccountView(google: google, onDeleted: {
+                                onSignOutAll()
+                                isGuest = false
+                                dismiss()
+                            })
+                        } label: {
+                            Text("Delete Account")
+                        }
+                    }
                 }
 
                 Section("Help") {
@@ -1435,6 +1507,12 @@ struct SettingsView: View {
                             Text("How to use HushhVoice")
                         }
                     }
+                }
+
+                Section("Coming Soon / Planned Features") {
+                    Label("iCloud sync for chats", systemImage: "icloud")
+                    Label("Offline voice mode", systemImage: "waveform")
+                    Label("Expanded integrations (Drive, Slack)", systemImage: "bolt.horizontal")
                 }
 
                 Section("About") {
@@ -1463,6 +1541,7 @@ struct SettingsView: View {
 struct AuthGateView: View {
     @ObservedObject private var google = GoogleSignInManager.shared
     @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
+    @AppStorage("hushh_guest_mode") private var isGuest: Bool = false
 
     private var tagline: String {
         "Your data. Your business. In voice mode."
@@ -1504,7 +1583,10 @@ struct AuthGateView: View {
 
             // ✅ BUTTONS
             VStack(spacing: 14) {
-                Button { google.signIn() } label: {
+                Button {
+                    isGuest = false
+                    google.signIn()
+                } label: {
                     HStack(spacing: 10) {
                         Image(systemName: "g.circle.fill")
                             .font(.system(size: 18, weight: .semibold))
@@ -1536,6 +1618,29 @@ struct AuthGateView: View {
                 SupabaseSignInWithAppleButton()
                     .frame(height: 52)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
+
+                Button {
+                    isGuest = true
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "person.crop.circle.badge.questionmark")
+                            .font(.system(size: 18, weight: .semibold))
+                        Text("Continue as Guest")
+                            .font(.headline.weight(.semibold))
+                        Spacer()
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 14, weight: .semibold))
+                            .opacity(0.8)
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 52)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                    )
+                }
+                .foregroundColor(.white)
             }
             .padding(.horizontal, 28)
 
@@ -1569,6 +1674,97 @@ struct AuthGateView: View {
 }
 
 // ======================================================
+// MARK: - DELETE ACCOUNT
+// ======================================================
+
+struct DeleteAccountView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var google: GoogleSignInManager
+
+    @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
+    @AppStorage("hushh_guest_mode") private var isGuest: Bool = false
+
+    @State private var confirmText: String = ""
+    @State private var isDeleting: Bool = false
+    @State private var errorText: String?
+    @State private var success: Bool = false
+
+    var onDeleted: () -> Void
+
+    private var deleteEnabled: Bool {
+        confirmText == "DELETE" && !isDeleting
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Text("Deleting your account removes all personal data, onboarding answers, chat history, and disconnects integrations. This cannot be undone.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+            } header: { Text("Warning") }
+
+            Section {
+                TextField("Type DELETE to confirm", text: $confirmText)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+
+                if let errorText {
+                    Text(errorText)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+
+                if success {
+                    Text("Your account has been deleted.")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.green)
+                }
+            } footer: {
+                Text("You must type DELETE to enable the button.")
+            }
+
+            Section {
+                Button(role: .destructive) {
+                    Task { await deleteAccount() }
+                } label: {
+                    if isDeleting {
+                        ProgressView().tint(.red)
+                    } else {
+                        Text("Delete Account")
+                    }
+                }
+                .disabled(!deleteEnabled)
+            }
+        }
+        .navigationTitle("Delete Account")
+    }
+
+    private func deleteAccount() async {
+        guard deleteEnabled else { return }
+        isDeleting = true
+        errorText = nil
+
+        let token = await google.ensureValidAccessToken()
+
+        do {
+            try await HushhAPI.deleteAccount(googleToken: token, appleUserID: appleUserID)
+            await google.disconnect()
+            AppleSupabaseAuth.shared.signOut()
+            appleUserID = ""
+            isGuest = false
+            success = true
+            onDeleted()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { dismiss() }
+        } catch {
+            errorText = error.localizedDescription
+        }
+
+        isDeleting = false
+    }
+}
+
+// ======================================================
 // MARK: - CHAT VIEW (root)
 // ======================================================
 
@@ -1583,6 +1779,7 @@ struct ChatView: View {
     @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
     @AppStorage("hushh_is_dark") private var isDarkMode: Bool = true
     @AppStorage("hushh_has_seen_intro") private var hasSeenIntro: Bool = false
+    @AppStorage("hushh_guest_mode") private var isGuest: Bool = false
 
     @State private var input: String = ""
     @State private var sending = false
@@ -1591,6 +1788,8 @@ struct ChatView: View {
     @State private var showingSettings = false
     @State private var showingIntro = false
     @State private var animatingAssistantID: UUID?
+    @State private var showGoogleGate: Bool = false
+    @State private var gatedPrompt: String = ""
 
     private let emptyPhrases = [
         "Hi, I'm HushhVoice. How may I help you?",
@@ -1602,7 +1801,7 @@ struct ChatView: View {
     @State private var currentEmptyPhrase: String = ""
 
     private var isAuthenticated: Bool {
-        auth.isSignedIn || !appleUserID.isEmpty
+        isGuest || auth.isSignedIn || !appleUserID.isEmpty
     }
 
     var body: some View {
@@ -1625,6 +1824,9 @@ struct ChatView: View {
         .onAppear {
             HVTheme.setMode(isDark: isDarkMode)
             auth.loadFromDisk()
+            if auth.isSignedIn || !appleUserID.isEmpty {
+                isGuest = false
+            }
         }
         .onChange(of: isDarkMode) { _, newValue in
             HVTheme.setMode(isDark: newValue)
@@ -1740,10 +1942,17 @@ struct ChatView: View {
         }
         .tint(HVTheme.accent)
         .sheet(isPresented: $showingSettings) {
-            SettingsView(isDarkMode: $isDarkMode, google: auth, onSignOutAll: handleSignOut)
+            SettingsView(isDarkMode: $isDarkMode, google: auth, isGuest: $isGuest, onSignOutAll: handleSignOut)
         }
         .sheet(isPresented: $showingIntro) {
             OnboardingView()
+        }
+        .alert("Connect Google to Continue", isPresented: $showGoogleGate) {
+            Button("Go to Settings") { showingSettings = true }
+            Button("Sign in with Google") { auth.signIn() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("To answer Gmail or Calendar questions, connect Google in Settings.")
         }
         .onAppear {
             randomizeEmptyPhrase()
@@ -1769,12 +1978,20 @@ struct ChatView: View {
         let q = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
 
+        let needsGoogle = requiresGoogleIntegration(for: q)
+        let token = await auth.ensureValidAccessToken()
+
+        if needsGoogle && token == nil {
+            gatedPrompt = q
+            showGoogleGate = true
+            return
+        }
+
         sending = true
         input = ""
         showTyping = true
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
 
-        let token = await auth.ensureValidAccessToken()
         await store.send(q, googleToken: token)
 
         showTyping = false
@@ -1793,8 +2010,15 @@ struct ChatView: View {
         AppleSupabaseAuth.shared.signOut()
         appleUserID = ""
         auth.signOut()
+        isGuest = false
         speech.stop()
         store.clearMessagesInActiveChat()
+    }
+
+    private func requiresGoogleIntegration(for text: String) -> Bool {
+        let lower = text.lowercased()
+        let keywords = ["gmail", "email", "inbox", "calendar", "event", "meeting", "schedule"]
+        return keywords.contains { lower.contains($0) }
     }
 }
 
