@@ -3,16 +3,16 @@
 //  HushhVoice
 //
 //  FINAL FLOW (as per your latest requirements):
-//   0) HushhVoice Intro screen (after sign-in) ✅
-//   1) Voice picker screen (tap a voice -> plays 3–4s preview) ✅
-//   2..5) 4 standard questions (same UI) ✅
-//   6) Agent follow-ups using /onboarding/agent (EXACT SAME UI as questions) ✅
-//        - loader while waiting ✅
-//        - no “handoff” filler line ✅
-//   7) Summary screen (Thanks + summary) ✅
-//        - do NOT show “enough info to prefill…” ✅
-//        - jump straight to summary when backend returns redirect ✅
-//   8) Final choices ✅
+//   0) HushhVoice Intro screen (after sign-in) 
+//   1) Voice picker screen (tap a voice -> plays 3–4s preview)
+//   2..5) 4 standard questions (same UI)
+//   6) Agent follow-ups using /onboarding/agent (EXACT SAME UI as questions)
+//        - loader while waiting
+//        - no “handoff” filler line
+//   7) Summary screen (Thanks + summary)
+//        - do NOT show “enough info to prefill…”
+//        - jump straight to summary when backend returns redirect
+//   8) Final choices
 //
 //  NOTE:
 //  - This file includes STTController + OnboardingTTSManager so “Cannot find STTController” won’t happen.
