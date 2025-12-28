@@ -112,6 +112,7 @@ final class AppleSupabaseAuth: ObservableObject {
 
 struct SupabaseSignInWithAppleButton: View {
     @State private var currentNonce: String = ""
+    @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
 
     var body: some View {
         SignInWithAppleButton(.continue) { request in
@@ -138,6 +139,9 @@ struct SupabaseSignInWithAppleButton: View {
                         idToken: idToken,
                         rawNonce: nonce
                     )
+                    if let uid = AppleSupabaseAuth.shared.supabaseUserID, !uid.isEmpty {
+                        appleUserID = uid
+                    }
                 }
 
             case .failure:

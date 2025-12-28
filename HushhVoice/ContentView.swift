@@ -762,6 +762,16 @@ final class ChatStore: ObservableObject {
         save()
     }
 
+    func clearAllChatsAndReset() {
+        chats.removeAll()
+        UserDefaults.standard.removeObject(forKey: chatsKey)
+
+        let c = Chat()
+        chats = [c]
+        activeChatID = c.id
+        save()
+    }
+
     private func load() {
         if let raw = UserDefaults.standard.data(forKey: chatsKey) {
             do {
@@ -1406,6 +1416,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) var dismiss
     @Binding var isDarkMode: Bool
     @ObservedObject var google: GoogleSignInManager
+    @ObservedObject var store: ChatStore
     @Binding var isGuest: Bool
 
     @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
@@ -1429,22 +1440,35 @@ struct SettingsView: View {
                             .font(.footnote)
                     }
 
-                    Button { google.signIn() } label: {
-                        HStack {
-                            Image(systemName: "envelope.circle.fill")
-                            Text(google.hasConnectedGoogle ? "Reconnect Google" : "Sign in with Google")
+                    if google.hasConnectedGoogle {
+                        Button { google.signIn() } label: {
+                            HStack {
+                                Image(systemName: "envelope.circle.fill")
+                                Text("Reconnect Google")
+                            }
                         }
-                    }
 
-                    Button(role: .destructive) {
-                        Task { await google.disconnect() }
-                    } label: {
-                        HStack {
-                            Image(systemName: "xmark.circle.fill")
-                            Text("Disconnect Google")
+                        Button(role: .destructive) {
+                            Task {
+                                await google.disconnect()
+                                if appleUserID.isEmpty {
+                                    isGuest = true
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "xmark.circle.fill")
+                                Text("Disconnect Google")
+                            }
+                        }
+                    } else {
+                        Button { google.signIn() } label: {
+                            HStack {
+                                Image(systemName: "envelope.circle.fill")
+                                Text("Sign in with Google")
+                            }
                         }
                     }
-                    .disabled(!google.hasConnectedGoogle)
                 }
 
                 if isGuest {
@@ -1475,28 +1499,30 @@ struct SettingsView: View {
                         Button(role: .destructive) {
                             AppleSupabaseAuth.shared.signOut()
                             appleUserID = ""
+                            if !google.hasConnectedGoogle {
+                                isGuest = true
+                            }
                         } label: {
                             Text("Unlink Apple ID")
                         }
                     }
 
-                    Button(role: .destructive) {
-                        onSignOutAll()
-                        dismiss()
-                    } label: {
-                        Text("Sign out of HushhVoice")
+                    if google.hasConnectedGoogle || !appleUserID.isEmpty {
+                        Button(role: .destructive) {
+                            onSignOutAll()
+                            dismiss()
+                        } label: {
+                            Text("Sign out of HushhVoice")
+                        }
                     }
 
-                    if !isGuest {
-                        NavigationLink {
-                            DeleteAccountView(google: google, onDeleted: {
-                                onSignOutAll()
-                                isGuest = false
-                                dismiss()
-                            })
-                        } label: {
-                            Text("Delete Account")
-                        }
+                    NavigationLink {
+                        DeleteAccountView(store: store, google: google, onDeleted: {
+                            isGuest = true
+                            dismiss()
+                        })
+                    } label: {
+                        Text("Delete Account")
                     }
                 }
 
@@ -1679,6 +1705,7 @@ struct AuthGateView: View {
 
 struct DeleteAccountView: View {
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject var store: ChatStore
     @ObservedObject var google: GoogleSignInManager
 
     @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
@@ -1740,25 +1767,24 @@ struct DeleteAccountView: View {
         .navigationTitle("Delete Account")
     }
 
+    @MainActor
     private func deleteAccount() async {
         guard deleteEnabled else { return }
         isDeleting = true
         errorText = nil
 
-        let token = await google.ensureValidAccessToken()
-
-        do {
-            try await HushhAPI.deleteAccount(googleToken: token, appleUserID: appleUserID)
+        if google.hasConnectedGoogle {
             await google.disconnect()
+        }
+        if !appleUserID.isEmpty {
             AppleSupabaseAuth.shared.signOut()
             appleUserID = ""
-            isGuest = false
-            success = true
-            onDeleted()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { dismiss() }
-        } catch {
-            errorText = error.localizedDescription
         }
+        store.clearAllChatsAndReset()
+        isGuest = true
+        success = true
+        onDeleted()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { dismiss() }
 
         isDeleting = false
     }
@@ -1942,7 +1968,7 @@ struct ChatView: View {
         }
         .tint(HVTheme.accent)
         .sheet(isPresented: $showingSettings) {
-            SettingsView(isDarkMode: $isDarkMode, google: auth, isGuest: $isGuest, onSignOutAll: handleSignOut)
+            SettingsView(isDarkMode: $isDarkMode, google: auth, store: store, isGuest: $isGuest, onSignOutAll: handleSignOut)
         }
         .sheet(isPresented: $showingIntro) {
             OnboardingView()
@@ -2010,7 +2036,7 @@ struct ChatView: View {
         AppleSupabaseAuth.shared.signOut()
         appleUserID = ""
         auth.signOut()
-        isGuest = false
+        isGuest = true
         speech.stop()
         store.clearMessagesInActiveChat()
     }
