@@ -2,1445 +2,953 @@
 //  Onboarding.swift
 //  HushhVoice
 //
-//  FINAL FLOW (as per your latest requirements):
-//   0) HushhVoice Intro screen (after sign-in) 
-//   1) Voice picker screen (tap a voice -> plays 3–4s preview)
-//   2..5) 4 standard questions (same UI)
-//   6) Agent follow-ups using /onboarding/agent (EXACT SAME UI as questions)
-//        - loader while waiting
-//        - no “handoff” filler line
-//   7) Structured summary table (review + edit or confirm)
+//  Minimal “Orb + Mute” Kai Voice Mode (Realtime WebRTC)
 //
-//  NOTE:
-//  - This file includes STTController + OnboardingTTSManager so “Cannot find STTController” won’t happen.
+//  ✅ metasidd/Orb animated orb
+//  ✅ hushh_quiet_logo mute button (small + low)
+//  ✅ Waveform under orb (mic level)
+//  ✅ Real speech-to-speech via OpenAI Realtime over WebRTC
+//  ✅ Echo cancellation via AVAudioSession voiceChat
+//
+//  Dependencies:
+//  - LiveKit WebRTC XCFramework: https://github.com/livekit/webrtc-xcframework (module: LiveKitWebRTC)
+//  - Orb package: https://github.com/metasidd/Orb.git (module: Orb)
+//
+//  Backend endpoints expected:
+//  - GET {backendBase}/onboarding/agent/config
+//  - POST {backendBase}/onboarding/agent/token
+//
+//  Backend JSON envelope expected (your jok()):
+//  { "ok": true, "data": { "instructions": "...", "tools": [...], "realtime": { "turn_detection": {...} }, "kickoff": { "response": {...} } } }
+//
+//  Notes:
+//  - This file avoids Decodable generics; uses JSONSerialization.
+//  - Remote audio plays automatically via WebRTC.
+//  - Data channel is used for session.update + debugging states.
+//  - Mic mute disables local track + mic meter.
 //
 
 import SwiftUI
 import Foundation
-import Speech
 import AVFoundation
+import LiveKitWebRTC
+import Orb
 
 // ======================================================
-// MARK: - Onboarding
+// MARK: - Mic Level Monitor (for waveform)
+// ======================================================
+
+final class MicLevelMonitor: ObservableObject {
+    @Published var level: CGFloat
+
+    private static let idleLevel: CGFloat = 0.06
+    private let engine = AVAudioEngine()
+    private var isRunning = false
+    private var smoothedLevel: CGFloat
+
+    init() {
+        self.level = Self.idleLevel
+        self.smoothedLevel = Self.idleLevel
+    }
+
+    func start() {
+        guard !isRunning else { return }
+        isRunning = true
+
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            guard let self else { return }
+            guard let channelData = buffer.floatChannelData?[0] else { return }
+            let frames = Int(buffer.frameLength)
+            guard frames > 0 else { return }
+
+            var sum: Float = 0
+            for i in 0..<frames { sum += channelData[i] * channelData[i] }
+            let rms = sqrt(sum / Float(frames))
+
+            // Normalize -> 0...1 (tune if needed)
+            let normalized = max(0, min((rms - 0.003) / 0.05, 1))
+            let boosted = pow(normalized, 0.5)
+
+            let target = Self.idleLevel + (1 - Self.idleLevel) * CGFloat(boosted)
+
+            // Smooth
+            let smoothing: CGFloat = 0.18
+            smoothedLevel = smoothedLevel + (target - smoothedLevel) * smoothing
+
+            DispatchQueue.main.async {
+                self.level = self.smoothedLevel
+            }
+        }
+
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
+            try session.setActive(true, options: [])
+            engine.prepare()
+            try engine.start()
+        } catch {
+            print("MicLevelMonitor start error:", error)
+        }
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        DispatchQueue.main.async {
+            self.level = Self.idleLevel
+        }
+    }
+
+    func setMuted(_ muted: Bool) {
+        if muted { stop() } else { start() }
+    }
+}
+
+// ======================================================
+// MARK: - UI State
+// ======================================================
+
+enum OrbState {
+    case connecting
+    case listening
+    case speaking
+    case muted
+    case error
+}
+
+// ======================================================
+// MARK: - Onboarding Screen
 // ======================================================
 
 struct Onboarding: View {
 
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openURL) private var openURL
-
-    // Completion flag
-    @AppStorage("hv_has_completed_investor_onboarding") private var done: Bool = false
-
-    // Voice choice
-    @AppStorage("hv_selected_voice") private var selectedVoice: String = "alloy"
-    @AppStorage("hv_has_chosen_voice") private var hasChosenVoice: Bool = false
-
-    // Resume state
-    @AppStorage("hv_onboarding_page_v4") private var savedPage: Int = 0
-    @AppStorage("hv_onboarding_a0") private var a0: String = ""
-    @AppStorage("hv_onboarding_a1") private var a1: String = ""
-    @AppStorage("hv_onboarding_a2") private var a2: String = ""
-    @AppStorage("hv_onboarding_a3") private var a3: String = ""
-    @AppStorage("hv_onboarding_summary") private var savedSummary: String = ""
-
-    // Agent state (minimal)
-    @AppStorage("hv_onboarding_agent_qcount") private var savedAgentQCount: Int = 1
-    @AppStorage("hv_onboarding_agent_prompt") private var savedAgentPrompt: String = ""
-
     @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
-    @ObservedObject private var google = GoogleSignInManager.shared
+    @AppStorage("hushh_kai_user_id") private var kaiUserID: String = ""
 
-    // Pages:
-    // 0=intro, 1=voice, 2..5=standard Qs, 6=agent Qs, 7=summary
-    @State private var page: Int = 0
-    @State private var didInitialRestore: Bool = false
+    @StateObject private var vm = KaiVoiceViewModel()
+    @StateObject private var micMonitor = MicLevelMonitor()
+    @State private var resolvedUserID: String = ""
 
-    // Standard answers (4)
-    @State private var answers: [String] = ["", "", "", ""]
-
-    // Agent follow-up prompt + answer (same UI as standard)
-    @State private var agentPrompt: String = ""
-    @State private var agentAnswer: String = ""
-    @State private var agentQuestionsAsked: Int = 1
-    @State private var didSeedAgent: Bool = false
-    @State private var agentPrompts: [String] = []
-    @State private var currentAgentQuestionIndex: Int = 0
-
-    // Summary
-    @State private var summaryText: String = ""
-    @State private var answersByStepId: [Int: String] = [:]
-    @State private var questionByStepId: [Int: String] = [:]
-    @State private var submittedAnswers: [Int: String] = [:]
-    @State private var currentStepIndex: Int = 0
-
-    // Permissions
-    @State private var permissionDenied: Bool = false
-    @State private var didRequestPermsOnce: Bool = false
-
-    // Loading / errors
-    @State private var isSaving: Bool = false
-    @State private var isAgentLoading: Bool = false
-    @State private var errorText: String?
-
-    // Typing animation for prompt text
-    @State private var typingText: String = ""
-    @State private var typingTask: Task<Void, Never>?
-
-    // Gate interaction until prompt heard once
-    @State private var hasHeardPage: [Bool] = Array(repeating: false, count: 8)
-    @State private var ttsCooldownUntil: Date = .distantPast
-
-    // STT + TTS
-    @StateObject private var stt = STTController(localeID: "en-US")
-    @StateObject private var tts = OnboardingTTSManager()
-
-    // Summary typing
-    @State private var typingTextForSummary: String = ""
-    @State private var summaryTypingTask: Task<Void, Never>?
-
-    // MARK: Copy
-
-    private let introLine =
-    "Welcome! I’m Agent Kai by Hushh, your AI financial agent. I’ll guide you through investor onboarding with a few quick questions, so I can help you make smarter, more informed financial decisions. Let’s get started."
-
-    private let voiceIntroLine =
-    "Choose a voice to customize Agent Kai. Tap any voice to hear a quick preview."
-
-    private let questions: [String] = [
-        "What is your approximate net worth? This helps us understand your financial position for personalized insights. Feel free to answer in depth.",
-        "What are your current investment goals or plans? Feel free to share anything you’re considering right now.",
-        "What about your health can we help you with?",
-        "What about your wealth can we help you with?"
-    ]
-
-    private let summaryIntro =
-    "Thanks for the information — this helps us understand you better. Here’s a quick summary of what we understood about you."
-
-    // MARK: Supabase (final write at end)
-
-    private let SB_URL = "https://ibsisfnjxeowvdtvgzff.supabase.co"
-    private let SB_TABLE = "investor_onboarding_via_hushhvoice"
-    private let SB_ANON_KEY =
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlic2lzZm5qeGVvd3ZkdHZnemZmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ1NTk1NzgsImV4cCI6MjA4MDEzNTU3OH0.K16sO1R9L2WZGPueDP0mArs2eDYZc-TnIk2LApDw_fs"
-
-    private var userID: String {
+    private func resolveUserID() -> String {
         if !appleUserID.isEmpty { return appleUserID }
-        if let token = google.accessToken { return "google:\(token.prefix(16))" }
-        return UUID().uuidString
+        if !kaiUserID.isEmpty { return kaiUserID }
+        let newID = UUID().uuidString
+        kaiUserID = newID
+        return newID
     }
-
-    // MARK: Prompt per page
-
-    private var pagePrompt: String {
-        switch page {
-        case 0: return introLine
-        case 1: return voiceIntroLine
-        case 2...5: return questions[page - 2]
-        case 6:
-            // IMPORTANT: no filler line — either show current agent prompt or nothing while loading
-            return currentAgentPrompt
-        case 7: return summaryIntro
-        default: return "All set. Choose what you want to do next."
-        }
-    }
-
-    private var currentAgentPrompt: String {
-        if agentPrompts.indices.contains(currentAgentQuestionIndex) {
-            return agentPrompts[currentAgentQuestionIndex]
-        }
-        if let cached = questionByStepId[6 + currentAgentQuestionIndex] {
-            return cached
-        }
-        return agentPrompt
-    }
-
-    private var isTTSBusy: Bool { tts.isPlaying || tts.isLoading }
-
-    private var canInteract: Bool {
-        hasHeardPage.indices.contains(page) ? hasHeardPage[page] : true
-    }
-
-    private var currentAnswerBinding: Binding<String> {
-        Binding(
-            get: {
-                if (2...5).contains(page) { return answers[page - 2] }
-                if page == 6 {
-                    let stepId = 6 + currentAgentQuestionIndex
-                    return answersByStepId[stepId] ?? agentAnswer
-                }
-                return ""
-            },
-            set: { newValue in
-                if (2...5).contains(page) { answers[page - 2] = newValue }
-                if page == 6 {
-                    agentAnswer = newValue
-                    let stepId = 6 + currentAgentQuestionIndex
-                    answersByStepId[stepId] = newValue
-                }
-            }
-        )
-    }
-
-    private var currentAnswerIsEmpty: Bool {
-        if (2...5).contains(page) {
-            return answers[page - 2].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-        if page == 6 {
-            let stepId = 6 + currentAgentQuestionIndex
-            let text = answersByStepId[stepId] ?? agentAnswer
-            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-        return false
-    }
-
-    private var allStandardAnswersFilled: Bool {
-        answers.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    }
-
-    // ======================================================
-    // MARK: UI
-    // ======================================================
 
     var body: some View {
         ZStack {
             HVTheme.bg.ignoresSafeArea()
 
+            // Subtle premium radial accent
             RadialGradient(
-                colors: [HVTheme.accent.opacity(0.22), Color.clear],
-                center: .topLeading,
-                startRadius: 10,
-                endRadius: 460
+                colors: [HVTheme.accent.opacity(0.18), Color.clear],
+                center: .center,
+                startRadius: 30,
+                endRadius: 520
             )
             .ignoresSafeArea()
             .allowsHitTesting(false)
 
             VStack(spacing: 14) {
-                header
 
-                Spacer(minLength: 6)
+                // Header
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Kai")
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(HVTheme.botText.opacity(0.95))
 
-                card
-                    .padding(.horizontal, 16)
-                    .id(page)
+                        Text(vm.subtitle)
+                            .font(.footnote)
+                            .foregroundStyle(HVTheme.botText.opacity(0.6))
+                    }
 
-                if let errorText {
-                    Text(errorText)
+                    Spacer()
+
+                    Button {
+                        vm.stop()
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .semibold))
+                            .padding(10)
+                            .background(Circle().fill(HVTheme.surfaceAlt))
+                            .overlay(Circle().stroke(HVTheme.stroke))
+                    }
+                    .foregroundStyle(HVTheme.botText)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+
+                Spacer()
+
+                // Orb (metasidd/Orb) — replaces any old blob
+                KaiOrb(configuration: vm.orbConfiguration, size: 270)
+                    .padding(.bottom, 6)
+
+                // Waveform (mic amplitude) — matches screenshot vibe
+                WaveformView(level: micMonitor.level, isMuted: vm.isMuted, accent: HVTheme.accent)
+                    .padding(.horizontal, 24)
+                    .opacity(vm.state == .connecting ? 0.6 : 1.0)
+
+                // Quiet button smaller + lower (like the reference)
+                QuietMicButtonSmall(isMuted: $vm.isMuted) {
+                    vm.setMuted(vm.isMuted)
+                }
+                .disabled(vm.state == .connecting)
+
+                if let err = vm.errorText {
+                    Text(err)
                         .font(.footnote)
                         .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
                         .padding(.horizontal, 16)
                 }
 
                 Spacer()
 
-                bottomBar
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
-            }
-            .padding(.top, 10)
-        }
-        .onAppear { restoreState() }
-        .onChange(of: page) { _, newPage in
-            if didInitialRestore {
-                currentStepIndex = newPage
-                persistState()
-                enterPage(newPage, speak: true)
+                Text(vm.footerText)
+                    .font(.footnote)
+                    .foregroundStyle(HVTheme.botText.opacity(0.55))
+                    .padding(.bottom, 14)
             }
         }
-        .onChange(of: currentStepIndex) { _, newPage in
-            if page != newPage {
-                page = newPage
-            }
+        .onAppear {
+            micMonitor.start()
+            micMonitor.setMuted(vm.isMuted)
+            let id = resolveUserID()
+            resolvedUserID = id
+            vm.start(userId: id)
         }
-        .onChange(of: answers) { _, newValue in
-            answersByStepId[2] = newValue[0]
-            answersByStepId[3] = newValue[1]
-            answersByStepId[4] = newValue[2]
-            answersByStepId[5] = newValue[3]
-            if didInitialRestore { persistState() }
-        }
-        .onChange(of: agentPrompt) { _, _ in if didInitialRestore { persistState() } }
-        .onChange(of: summaryText) { _, _ in if didInitialRestore { persistState() } }
-        .onChange(of: tts.isPlaying) { _, playing in if !playing { markHeardIfNeeded() } }
-        .onChange(of: tts.isLoading) { _, loading in if !loading && !tts.isPlaying { markHeardIfNeeded() } }
         .onDisappear {
-            stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
-            typingTask?.cancel()
-            summaryTypingTask?.cancel()
-            tts.stop()
+            micMonitor.stop()
+            vm.stop()
         }
-    }
-
-    // ======================================================
-    // MARK: Restore / Persist
-    // ======================================================
-
-    private func restoreState() {
-        answers = [a0, a1, a2, a3]
-        summaryText = savedSummary
-        agentQuestionsAsked = max(1, savedAgentQCount)
-        agentPrompt = savedAgentPrompt
-        answersByStepId = [
-            2: a0,
-            3: a1,
-            4: a2,
-            5: a3
-        ]
-        if !savedAgentPrompt.isEmpty {
-            agentPrompts = [savedAgentPrompt]
-            questionByStepId[6] = savedAgentPrompt
-            didSeedAgent = true
+        .onChange(of: vm.isMuted) { muted in
+            micMonitor.setMuted(muted)
         }
-        currentStepIndex = page
-
-        if done {
-            page = 7
-        } else {
-            // Always show intro first after sign-in
-            // then voice, then questions...
-            page = 0
-        }
-
-        didInitialRestore = true
-        enterPage(page, speak: true)
-    }
-
-    private func persistState() {
-        savedPage = page
-        a0 = answers[0]
-        a1 = answers[1]
-        a2 = answers[2]
-        a3 = answers[3]
-        savedSummary = summaryText
-        savedAgentQCount_toggleSafe(agentQuestionsAsked)
-        savedAgentPrompt = agentPrompt
-    }
-
-    private func savedAgentQCount_toggleSafe(_ v: Int) {
-        savedAgentQCount = max(1, v)
-    }
-
-    // ======================================================
-    // MARK: Header
-    // ======================================================
-
-    private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("HushhVoice")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(HVTheme.botText)
-                    .opacity(0.95)
-
-                Text(subtitleText)
-                    .font(.footnote)
-                    .foregroundStyle(HVTheme.botText.opacity(0.6))
-            }
-
-            Spacer()
-
-            Button {
-                tts.stop()
-                stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
-                persistState()
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .semibold))
-                    .padding(10)
-                    .background(Circle().fill(HVTheme.surfaceAlt))
-                    .overlay(Circle().stroke(HVTheme.stroke))
-            }
-            .foregroundStyle(HVTheme.botText)
-        }
-        .padding(.horizontal, 16)
-    }
-
-    private var subtitleText: String {
-        switch page {
-        case 0: return "Investor onboarding"
-        case 1: return "Choose voice"
-        case 2...5: return "Question \(page - 1) of 4"
-        case 6: return "Follow-ups"
-        case 7: return "Summary"
-        default: return "Completed"
-        }
-    }
-
-    // ======================================================
-    // MARK: Card
-    // ======================================================
-
-    private var card: some View {
-        VStack(alignment: .leading, spacing: 14) {
-
-            HStack {
-                Text(pageTitle)
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(HVTheme.botText.opacity(0.95))
-                Spacer()
-
-                if (2...5).contains(page) {
-                    progressPills(current: page - 1, total: 4)
-                } else if page == 6 {
-                    Text("Step 6 of 7")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(HVTheme.botText.opacity(0.7))
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 10)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(HVTheme.surfaceAlt))
-                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
-                } else if page == 7 {
-                    Text("Step 7 of 7")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(HVTheme.botText.opacity(0.7))
-                        .padding(.vertical, 6)
-                        .padding(.horizontal, 10)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(HVTheme.surfaceAlt))
-                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
-                }
-            }
-
-            if page == 1 {
-                voicePickerBlock
-            } else if page == 7 {
-                summaryTableBlock
-            } else {
-                // Prompt text
-                Text(typingText.isEmpty ? pagePrompt : typingText)
-                    .font(page == 0 ? .body : .title3.weight(.semibold))
-                    .foregroundStyle(HVTheme.botText)
-                    .lineSpacing(4)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .opacity(0.98)
-
-                // Loader for agent follow-ups (fixes "stuck on previous question")
-                if page == 6 && isAgentLoading {
-                    HStack(spacing: 10) {
-                        ProgressView().scaleEffect(0.95)
-                        Text("One sec…")
-                            .font(.footnote)
-                            .foregroundStyle(HVTheme.botText.opacity(0.7))
-                    }
-                    .padding(.top, 4)
-                }
-
-                if page == 0 {
-                    introControls
-                } else if (2...6).contains(page) {
-                    answerBox
-                    controlsRow
-                }
-            }
-        }
-        .padding(18)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(HVTheme.surface)
-                .shadow(color: .black.opacity(0.35), radius: 18, x: 0, y: 10)
-        )
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(HVTheme.stroke, lineWidth: 1))
-        .onAppear { appearTick() }
-    }
-
-    private func appearTick() {
-        // kick typing animation on first render
-    }
-
-    private var pageTitle: String {
-        switch page {
-        case 0: return "Welcome"
-        case 1: return "Pick your voice"
-        case 2...5: return "Let’s personalize you"
-        case 6: return "Let’s finish this"
-        case 7: return "Summary"
-        default: return "You’re set"
-        }
-    }
-
-    private func progressPills(current: Int, total: Int) -> some View {
-        HStack(spacing: 6) {
-            ForEach(0..<total, id: \.self) { idx in
-                Capsule()
-                    .fill(idx < current ? HVTheme.accent : HVTheme.stroke)
-                    .frame(width: idx < current ? 18 : 8, height: 6)
-            }
-        }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 10)
-        .background(RoundedRectangle(cornerRadius: 12).fill(HVTheme.surfaceAlt))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
-    }
-
-    // ======================================================
-    // MARK: Voice Picker (page 1)
-    // ======================================================
-
-    private var voicePickerBlock: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Tap a voice to hear how Kai will sound.")
-                .font(.footnote)
-                .foregroundStyle(HVTheme.botText.opacity(0.65))
-
-            VStack(spacing: 10) {
-                voiceOption(
-                    id: "alloy",
-                    name: "Alloy",
-                    vibe: "Balanced, crisp, professional",
-                    preview: "Hey — I’m Alloy. I sound balanced, crisp, and professional. If you like clean and clear, I’m your voice."
-                )
-                voiceOption(
-                    id: "verse",
-                    name: "Verse",
-                    vibe: "Warm, expressive, conversational",
-                    preview: "Hey — I’m Verse. I sound warm and conversational. If you want something friendly and human, pick me."
-                )
-                voiceOption(
-                    id: "nova",
-                    name: "Nova",
-                    vibe: "Bright, confident, energetic",
-                    preview: "Hey — I’m Nova. I sound confident and energetic. If you like momentum and hype, I’m the one."
-                )
-                voiceOption(
-                    id: "sage",
-                    name: "Sage",
-                    vibe: "Calm, slow, reassuring",
-                    preview: "Hey — I’m Sage. I sound calm and reassuring. If you want something soothing and grounded, choose me."
-                )
-            }
-
-            Text("You can change this later in Settings.")
-                .font(.footnote)
-                .foregroundStyle(HVTheme.botText.opacity(0.6))
-                .padding(.top, 4)
-        }
-    }
-
-    private func voiceOption(id: String, name: String, vibe: String, preview: String) -> some View {
-        Button {
-            tts.stop()
-            selectedVoice = id
-            tts.speak(preview, voice: id) // play preview only on tap
-        } label: {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(name)
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(HVTheme.botText)
-                    Text(vibe)
-                        .font(.footnote)
-                        .foregroundStyle(HVTheme.botText.opacity(0.65))
-                }
-                Spacer()
-                Image(systemName: selectedVoice == id ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selectedVoice == id ? HVTheme.accent : HVTheme.botText.opacity(0.35))
-                    .font(.system(size: 18, weight: .semibold))
-            }
-            .padding(14)
-            .background(RoundedRectangle(cornerRadius: 16).fill(HVTheme.surfaceAlt))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(HVTheme.stroke))
-        }
-        .buttonStyle(.plain)
-    }
-
-    // ======================================================
-    // MARK: Intro controls (page 0)
-    // ======================================================
-
-    private var introControls: some View {
-        Button { toggleSpeakPrompt() } label: {
-            Label(isTTSBusy ? "Stop" : "Play", systemImage: isTTSBusy ? "stop.fill" : "speaker.wave.2.fill")
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-        }
-        .buttonStyle(.plain)
-        .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
-        .foregroundStyle(HVTheme.botText)
-        .disabled(!isTTSBusy && Date() < ttsCooldownUntil)
-    }
-
-    // ======================================================
-    // MARK: Answer UI (pages 2..6 share)
-    // ======================================================
-
-    private var answerBox: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Your answer")
-                .font(.footnote)
-                .foregroundStyle(HVTheme.botText.opacity(0.6))
-
-            TextField("Type and/or speak…", text: currentAnswerBinding, axis: .vertical)
-                .lineLimit(1...6)
-                .font(.body)
-                .foregroundStyle(HVTheme.botText)
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
-                .disabled(page == 6 && isAgentLoading) // lock while waiting
-
-            if stt.isRecording {
-                Text(stt.transcript.isEmpty ? "Listening…" : "Heard: \(stt.transcript)")
-                    .font(.footnote)
-                    .foregroundStyle(HVTheme.botText.opacity(0.78))
-                    .padding(.horizontal, 6)
-            }
-        }
-    }
-
-    private var controlsRow: some View {
-        HStack(spacing: 12) {
-
-            Button { Task { await micTapped() } } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: stt.isRecording ? "stop.fill" : "mic.fill")
-                    Text(stt.isRecording ? "Stop" : "Mic")
-                }
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-            }
-            .background(RoundedRectangle(cornerRadius: 14).fill(Color.white))
-            .foregroundStyle(.black)
-            .disabled(page == 6 && isAgentLoading)
-            .opacity((page == 6 && isAgentLoading) ? 0.6 : 1.0)
-
-            Button { toggleSpeakPrompt() } label: {
-                Image(systemName: isTTSBusy ? "stop.fill" : "speaker.wave.2.fill")
-                    .font(.headline)
-                    .padding(12)
-            }
-            .background(Circle().fill(HVTheme.surfaceAlt))
-            .overlay(Circle().stroke(HVTheme.stroke))
-            .foregroundStyle(HVTheme.botText)
-            .disabled(page == 6 && isAgentLoading)
-            .opacity((page == 6 && isAgentLoading) ? 0.6 : 1.0)
-        }
-    }
-
-    // ======================================================
-    // MARK: Summary (page 7)
-    // ======================================================
-
-    private var summaryTableBlock: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Review your details")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(HVTheme.botText)
-
-            VStack(alignment: .leading, spacing: 10) {
-                summaryRow(label: "Net worth", value: answers[0])
-                summaryRow(label: "Investment goals/plans", value: answers[1])
-                summaryRow(label: "Health help", value: answers[2])
-                summaryRow(label: "Wealth help", value: answers[3])
-
-                let agentEntries = answersByStepId
-                    .filter { $0.key >= 6 }
-                    .sorted { $0.key < $1.key }
-
-                ForEach(Array(agentEntries.enumerated()), id: \.element.key) { idx, entry in
-                    summaryRow(label: "Follow-up \(idx + 1)", value: entry.value)
-                }
-            }
-            .padding(12)
-            .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
-
-            if let errorText {
-                Text(errorText)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-            }
-
-            HStack(spacing: 12) {
-                Button {
-                    page = 2
-                    currentAgentQuestionIndex = 0
-                } label: {
-                    Text("Edit Answers")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                }
-                .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
-                .foregroundStyle(HVTheme.botText)
-
-                Button {
-                    confirmAndFinish()
-                } label: {
-                    if isSaving {
-                        ProgressView().tint(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                    } else {
-                        Text("Confirm & Finish")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                    }
-                }
-                .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.accent))
-                .foregroundStyle(.white)
-                .disabled(isSaving)
-            }
-        }
-    }
-
-    private func summaryRow(label: String, value: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(label)
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(HVTheme.botText.opacity(0.75))
-                .frame(width: 140, alignment: .leading)
-            Text(value.isEmpty ? "Not provided" : value)
-                .font(.body)
-                .foregroundStyle(HVTheme.botText)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    // ======================================================
-    // MARK: Bottom bar
-    // ======================================================
-
-    private var bottomBar: some View {
-        HStack(spacing: 12) {
-
-            if page > 0 {
-                Button {
-                    tts.stop()
-                    stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
-
-                    if page == 6 {
-                        if currentAgentQuestionIndex > 0 {
-                            currentAgentQuestionIndex -= 1
-                            agentAnswer = answersByStepId[6 + currentAgentQuestionIndex] ?? ""
-                        } else {
-                            page = 5
-                        }
-                    } else if page == 7 {
-                        page = 6
-                        currentAgentQuestionIndex = max(agentPrompts.count - 1, 0)
-                        agentAnswer = answersByStepId[6 + currentAgentQuestionIndex] ?? ""
-                    } else {
-                        page -= 1
-                    }
-                } label: {
-                    Text("Back")
-                        .font(.headline)
-                        .frame(width: 96)
-                        .padding(.vertical, 12)
-                }
-                .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.surfaceAlt))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
-                .foregroundStyle(HVTheme.botText)
-                .disabled(isAgentLoading || isSaving)
-                .opacity((isAgentLoading || isSaving) ? 0.6 : 1.0)
-            }
-
-            if page <= 7 {
-                Button {
-                    if page == 7 {
-                        confirmAndFinish()
-                    } else {
-                        Task { await nextTapped() }
-                    }
-                } label: {
-                    if isSaving || (page == 6 && isAgentLoading) {
-                        ProgressView().tint(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                    } else {
-                        Text(nextButtonTitle)
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                    }
-                }
-                .background(RoundedRectangle(cornerRadius: 14).fill(HVTheme.accent))
-                .foregroundStyle(.white)
-                .disabled(nextDisabled)
-                .opacity(nextDisabled ? 0.7 : 1.0)
-            }
-        }
-    }
-
-    private var nextButtonTitle: String {
-        switch page {
-        case 0: return "Next"
-        case 1: return "Continue"
-        case 5: return "Continue"
-        case 7: return "Confirm & Finish"
-        default: return "Next"
-        }
-    }
-
-    private var nextDisabled: Bool {
-        if isSaving { return true }
-        if page == 6 && isAgentLoading { return true }
-        if (2...6).contains(page) && currentAnswerIsEmpty { return true }
-        return false
-    }
-
-    // ======================================================
-    // MARK: Page enter + typing + seeding
-    // ======================================================
-
-    private func enterPage(_ newPage: Int, speak: Bool) {
-        errorText = nil
-
-        stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
-        tts.stop()
-
-        startTyping(pagePrompt.isEmpty ? " " : pagePrompt)
-
-        if speak && newPage != 1 {
-            // Don’t auto-speak on voice picker page
-            playTTS(text: pagePrompt, bypassCooldown: true)
-        }
-
-        if newPage == 6 && !didSeedAgent {
-            didSeedAgent = true
-            Task { await seedAgent() }
-        }
-
-        if newPage == 7 {
-            if !summaryText.isEmpty { startSummaryTyping(summaryText) }
-        } else {
-            summaryTypingTask?.cancel()
-            typingTextForSummary = ""
-        }
-    }
-
-    private func startTyping(_ text: String) {
-        typingTask?.cancel()
-        typingText = ""
-
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
-
-        typingTask = Task {
-            try? await Task.sleep(nanoseconds: 120_000_000)
-            var buffer = ""
-            for ch in t {
-                if Task.isCancelled { return }
-                buffer.append(ch)
-                await MainActor.run { typingText = buffer }
-                try? await Task.sleep(nanoseconds: 9_000_000)
-            }
-        }
-    }
-
-    private func startSummaryTyping(_ text: String) {
-        summaryTypingTask?.cancel()
-        typingTextForSummary = ""
-
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
-
-        summaryTypingTask = Task {
-            try? await Task.sleep(nanoseconds: 140_000_000)
-            var buffer = ""
-            for ch in t {
-                if Task.isCancelled { return }
-                buffer.append(ch)
-                await MainActor.run { typingTextForSummary = buffer }
-                try? await Task.sleep(nanoseconds: 8_000_000)
-            }
-        }
-    }
-
-    private func markHeardIfNeeded() {
-        guard hasHeardPage.indices.contains(page) else { return }
-        if !hasHeardPage[page] { hasHeardPage[page] = true }
-    }
-
-    private func toggleSpeakPrompt() {
-        if isTTSBusy { tts.stop(); return }
-        playTTS(text: pagePrompt, bypassCooldown: false)
-    }
-
-    private func playTTS(text: String, bypassCooldown: Bool) {
-        let now = Date()
-        if !bypassCooldown && now < ttsCooldownUntil { return }
-        if !bypassCooldown { ttsCooldownUntil = now.addingTimeInterval(1.0) }
-
-        stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
-        tts.stop()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-            self.tts.speak(text, voice: self.selectedVoice)
-        }
-    }
-
-    // ======================================================
-    // MARK: Mic / STT
-    // ======================================================
-
-    private func micTapped() async {
-        errorText = nil
-
-        if stt.isRecording {
-            stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
-            return
-        }
-
-        await stopTTSAndWait()
-
-        if !didRequestPermsOnce {
-            await requestPermissions()
-            didRequestPermsOnce = true
-        }
-
-        guard !permissionDenied else {
-            errorText = "Microphone & Speech permissions are required."
-            return
-        }
-
-        do { try await stt.start() }
-        catch { errorText = "Could not start recording." }
-    }
-
-    private func requestPermissions() async {
-        permissionDenied = false
-
-        let micGranted: Bool = await withCheckedContinuation { cont in
-            AVAudioSession.sharedInstance().requestRecordPermission { granted in
-                cont.resume(returning: granted)
-            }
-        }
-        guard micGranted else { permissionDenied = true; return }
-
-        let speechStatus: SFSpeechRecognizerAuthorizationStatus =
-        await withCheckedContinuation { cont in
-            SFSpeechRecognizer.requestAuthorization { status in
-                cont.resume(returning: status)
-            }
-        }
-        if speechStatus != .authorized { permissionDenied = true }
-    }
-
-    private func stopTTSAndWait() async {
-        await MainActor.run { tts.stop() }
-
-        for _ in 0..<30 {
-            if !(tts.isPlaying || tts.isLoading) { break }
-            try? await Task.sleep(nanoseconds: 35_000_000)
-        }
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-    }
-
-    private func appendTranscriptToAnswer(_ heard: String) {
-        let finalText = heard.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !finalText.isEmpty else { return }
-
-        var current = currentAnswerBinding.wrappedValue
-        if current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            current = finalText
-        } else {
-            let needsSpace = !(current.hasSuffix(" ") || current.hasSuffix("\n"))
-            current = current + (needsSpace ? " " : "") + finalText
-        }
-        currentAnswerBinding.wrappedValue = current
-    }
-
-    // ======================================================
-    // MARK: Flow: Next
-    // ======================================================
-
-    private func nextTapped() async {
-        errorText = nil
-        stt.stop(commit: true) { finalText in appendTranscriptToAnswer(finalText) }
-
-        // Intro -> Voice
-        if page == 0 {
-            page = 1
-            return
-        }
-
-        // Voice -> Q1 (lock voice choice)
-        if page == 1 {
-            hasChosenVoice = true
-            page = 2
-            return
-        }
-
-        // Standard Qs 2..4 -> next
-        if (2...4).contains(page) {
-            guard !currentAnswerIsEmpty else { return }
-            page += 1
-            return
-        }
-
-        // After Q4 (page 5) -> Agent follow-ups (page 6)
-        if page == 5 {
-            guard allStandardAnswersFilled else {
-                errorText = "Please answer all questions before continuing."
-                return
-            }
-            // Reset agent state fresh
-            agentPrompt = ""
-            agentAnswer = ""
-            agentQuestionsAsked = 1
-            didSeedAgent = false
-            agentPrompts.removeAll()
-            currentAgentQuestionIndex = 0
-            persistState()
-
-            page = 6
-            return
-        }
-
-        // Agent follow-ups (page 6)
-        if page == 6 {
-            let stepId = 6 + currentAgentQuestionIndex
-            let currentAnswer = (answersByStepId[stepId] ?? agentAnswer)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !currentAnswer.isEmpty else { return }
-
-            let hasCachedNext = (currentAgentQuestionIndex + 1) < agentPrompts.count
-            let answerChanged = submittedAnswers[stepId] != currentAnswer
-
-            if hasCachedNext && !answerChanged {
-                currentAgentQuestionIndex += 1
-                agentAnswer = answersByStepId[6 + currentAgentQuestionIndex] ?? ""
-                return
-            }
-
-            if answerChanged {
-                agentPrompts = Array(agentPrompts.prefix(currentAgentQuestionIndex + 1))
-                let keepSteps = Set((0...currentAgentQuestionIndex).map { 6 + $0 })
-                answersByStepId = answersByStepId.filter { keepSteps.contains($0.key) || $0.key < 6 }
-                submittedAnswers = submittedAnswers.filter { keepSteps.contains($0.key) }
-            }
-
-            agentAnswer = ""            // clear input immediately
-            isAgentLoading = true       // show loader immediately
-
-            do {
-                let result = try await callOnboardingAgent(userText: currentAnswer)
-                submittedAnswers[stepId] = currentAnswer
-                agentQuestionsAsked = agentPrompts.count + 1
-                persistState()
-
-                if result.nextAction == "redirect" {
-                    isSaving = true
-                    try await submitAllAnswersOnce()
-                    let summary = try await fetchInvestorSummary()
-                    summaryText = summary
-                    persistState()
-                    isSaving = false
-
-                    isAgentLoading = false
-                    page = 7
-                    return
-                }
-
-                // Continue: cache next prompt and move forward without re-calling unless changed
-                let newPrompt = result.assistant
-                agentPrompt = newPrompt
-                agentPrompts.append(newPrompt)
-                let nextStepId = 6 + (agentPrompts.count - 1)
-                questionByStepId[nextStepId] = newPrompt
-                currentAgentQuestionIndex = agentPrompts.count - 1
-                agentAnswer = answersByStepId[nextStepId] ?? ""
-                startTyping(newPrompt)
-                tts.speak(newPrompt, voice: selectedVoice)
-
-                isAgentLoading = false
-                return
-
-            } catch {
-                isAgentLoading = false
-                errorText = "Agent error: \(error.localizedDescription)"
-                return
-            }
-        }
-
-        // Summary -> Final
-        if page == 7 {
-            confirmAndFinish()
-            return
-        }
-    }
-
-    private func confirmAndFinish() {
-        done = true
-        persistState()
-        tts.stop()
-        stt.stop(commit: true) { _ in }
-        dismiss()
-    }
-
-    // ======================================================
-    // MARK: Agent Seed (no filler, direct next question)
-    // ======================================================
-
-    private func seedAgent() async {
-        // show loader while we fetch the first follow-up question
-        isAgentLoading = true
-        defer { isAgentLoading = false }
-
-        // Send the 4 standard answers as context
-        let context = """
-        My net worth: \(answers[0])
-        My investment goals/plans: \(answers[1])
-        Health help: \(answers[2])
-        Wealth help: \(answers[3])
-        """
-
-        do {
-            let result = try await callOnboardingAgent(userText: context)
-            agentQuestionsAsked += 1
-            persistState()
-
-            // If backend says redirect immediately (rare), still go to summary
-            if result.nextAction == "redirect" {
-                isSaving = true
-                try await submitAllAnswersOnce()
-                let summary = try await fetchInvestorSummary()
-                summaryText = summary
-                persistState()
-                isSaving = false
-                page = 7
-                return
-            }
-
-            agentPrompt = result.assistant
-            agentPrompts = [result.assistant]
-            questionByStepId[6] = result.assistant
-            currentAgentQuestionIndex = 0
-            agentAnswer = answersByStepId[6] ?? ""
-            startTyping(agentPrompt)
-            tts.speak(agentPrompt, voice: selectedVoice)
-
-        } catch {
-            errorText = "Agent error: \(error.localizedDescription)"
-        }
-    }
-
-    private func callOnboardingAgent(userText: String) async throws -> (assistant: String, nextAction: String) {
-        guard let url = URL(string: "\(HushhAPI.base)/onboarding/agent") else {
-            throw URLError(.badURL)
-        }
-
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let askedCount = max(agentPrompts.count, agentQuestionsAsked)
-        let payload: [String: Any] = [
-            "client_user_id": userID,
-            "questions_asked": askedCount,
-            "user_text": userText
-        ]
-        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
-
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw NSError(domain: "OnboardingAgent", code: http.statusCode,
-                          userInfo: [NSLocalizedDescriptionKey: body])
-        }
-
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let dataObj = json?["data"] as? [String: Any]
-        let assistant = (dataObj?["assistant_text"] as? String) ?? "Got it — what should we fill next?"
-        let nextAction = (dataObj?["next_action"] as? String) ?? "continue"
-        return (assistant, nextAction)
-    }
-
-    // ======================================================
-    // MARK: Submit standard answers to Supabase
-    // ======================================================
-
-    private func submitAllAnswersOnce() async throws {
-        guard let url = URL(string: "\(SB_URL)/rest/v1/\(SB_TABLE)") else {
-            throw URLError(.badURL)
-        }
-
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(SB_ANON_KEY, forHTTPHeaderField: "apikey")
-        req.setValue("Bearer \(SB_ANON_KEY)", forHTTPHeaderField: "Authorization")
-        req.setValue("return=minimal", forHTTPHeaderField: "Prefer")
-
-        let payload: [String: Any] = [
-            "user_id": userID,
-            "net_worth": answers[0],
-            "next_step": answers[1],
-            "health_help": answers[2],
-            "wealth_help": answers[3]
-        ]
-        req.httpBody = try JSONSerialization.data(withJSONObject: payload)
-
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-
-        if !(200..<300).contains(http.statusCode) {
-            let body = String(data: data, encoding: .utf8) ?? "(non-utf8 body)"
-            throw NSError(domain: "Onboarding", code: http.statusCode,
-                          userInfo: [NSLocalizedDescriptionKey: body])
-        }
-    }
-
-    // ======================================================
-    // MARK: Summary generation (uses /siri/ask)
-    // ======================================================
-
-    private func fetchInvestorSummary() async throws -> String {
-        let token = await google.ensureValidAccessToken()
-
-        let mergedContext = """
-        Net worth: \(answers[0])
-        Investment goals/plans: \(answers[1])
-        Health help: \(answers[2])
-        Wealth help: \(answers[3])
-        """
-
-        let prompt = """
-        You are Agent Kai (HushhVoice).
-        Write a short, clear, positive summary of what you understood about the user from the information below.
-
-        Rules:
-        - Output 5–6 lines MAX (use short lines; line breaks allowed).
-        - Sound natural and helpful like a voice assistant.
-        - Do NOT mention missing info, uncertainty, or what they didn’t say.
-        - Do NOT add facts that were not stated.
-        - Keep it warm, confident, and simple.
-        - No headings, no bullets, no numbering, no emojis.
-
-        User info:
-        \(mergedContext)
-        """
-
-        let data = try await HushhAPI.ask(prompt: prompt, googleToken: token)
-
-        let text =
-        (data.display?.removingPercentEncoding ?? data.display)
-        ?? (data.speech?.removingPercentEncoding ?? data.speech)
-        ?? ""
-
-        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let lines = cleaned
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-
-        if lines.count > 6 {
-            cleaned = lines.prefix(6).joined(separator: "\n")
-        }
-
-        if cleaned.isEmpty {
-            cleaned = """
-            Your net worth gives your current baseline.
-            Your goals show what you want to achieve next.
-            You shared the kind of health support you’re looking for.
-            You shared the wealth support you want right now.
-            I’ll personalize your next steps based on this.
-            """
-        }
-
-        return cleaned
     }
 }
 
 // ======================================================
-// MARK: - OnboardingTTSManager (voice param)
+// MARK: - Orb (metasidd/Orb wrapper)
 // ======================================================
 
-@MainActor
-final class OnboardingTTSManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate {
+private struct KaiOrb: View {
+    let configuration: OrbConfiguration
+    let size: CGFloat
 
-    @Published var isLoading: Bool = false
-    @Published var isPlaying: Bool = false
+    var body: some View {
+        OrbView(configuration: configuration)
+            .frame(width: size, height: size)
+            .clipShape(Circle())
+            .overlay(Circle().stroke(Color.white.opacity(0.10), lineWidth: 1))
+            .shadow(color: .black.opacity(0.55), radius: 28, x: 0, y: 14)
+    }
+}
 
-    private var player: AVAudioPlayer?
-    private let synth = AVSpeechSynthesizer()
+// ======================================================
+// MARK: - Waveform View (Canvas)
+// ======================================================
 
-    private var speakTask: Task<Void, Never>?
-    private var activeToken: UUID = UUID()
+private struct WaveformView: View {
+    var level: CGFloat
+    var isMuted: Bool
+    var accent: Color
 
-    override init() {
-        super.init()
-        synth.delegate = self
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            let idle = 0.07 + 0.03 * sin(t * 1.3)
+            let amp = max(0.04, isMuted ? idle : level)
+            let speed = isMuted ? 1.25 : 2.4
+
+            Canvas { context, size in
+                let midY = size.height / 2
+                let width = size.width
+                let base = midY * amp
+
+                let phases: [CGFloat] = [0.0, 0.85, 1.7]
+                let weights: [CGFloat] = [1.0, 0.62, 0.38]
+
+                for idx in 0..<phases.count {
+                    let phase = CGFloat(t) * speed + phases[idx]
+                    let amplitude = base * weights[idx]
+                    let path = wavePath(width: width, midY: midY, amplitude: amplitude, phase: phase)
+
+                    let opacity = isMuted ? 0.20 + (weights[idx] * 0.18) : 0.46 + (weights[idx] * 0.46)
+                    let color = accent.opacity(opacity)
+
+                    // soft glow layer
+                    context.drawLayer { layer in
+                        layer.addFilter(.blur(radius: 6))
+                        layer.opacity = isMuted ? 0.25 : 0.50
+                        layer.stroke(path, with: .color(color), lineWidth: 5)
+                    }
+                    // crisp stroke
+                    context.stroke(path, with: .color(color), lineWidth: 2.6)
+                }
+            }
+            .frame(height: 90)
+        }
+        .allowsHitTesting(false)
     }
 
-    func speak(_ text: String, voice: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+    private func wavePath(width: CGFloat, midY: CGFloat, amplitude: CGFloat, phase: CGFloat) -> Path {
+        var path = Path()
+        let points = 70
+        for i in 0...points {
+            let x = CGFloat(i) / CGFloat(points) * width
+            let relative = CGFloat(i) / CGFloat(points)
+            let sine = sin(relative * .pi * 2 + phase)
+            let envelope = sin(relative * .pi)
+            let y = midY + sine * amplitude * envelope
+            if i == 0 { path.move(to: CGPoint(x: x, y: y)) }
+            else { path.addLine(to: CGPoint(x: x, y: y)) }
+        }
+        return path
+    }
+}
 
-        stop()
+// ======================================================
+// MARK: - Quiet Mic Button (small + low)
+// ======================================================
 
-        let token = UUID()
-        activeToken = token
+private struct QuietMicButtonSmall: View {
+    @Binding var isMuted: Bool
+    var onToggle: () -> Void
 
-        isLoading = true
-        isPlaying = false
+    @State private var pulse = false
 
-        speakTask = Task { [weak self] in
-            guard let self else { return }
-
-            self.configureAudioSessionForTTS()
-
-            do {
-                let audioData = try await HushhAPI.tts(text: trimmed, voice: voice)
-                if Task.isCancelled { return }
-                guard self.activeToken == token else { return }
-
-                let p = try AVAudioPlayer(data: audioData)
-                p.delegate = self
-                p.prepareToPlay()
-
-                self.player = p
-                self.isLoading = false
-                self.isPlaying = true
-                p.play()
-                return
-            } catch {
-                // fallback to system voice
+    var body: some View {
+        Button {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.82)) {
+                isMuted.toggle()
+                onToggle()
             }
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(HVTheme.surfaceAlt.opacity(isMuted ? 0.80 : 1.0))
+                    .overlay(Circle().stroke(HVTheme.stroke.opacity(isMuted ? 0.9 : 0.55), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.35), radius: 10, x: 0, y: 4)
 
-            if Task.isCancelled { return }
-            guard self.activeToken == token else { return }
+                Circle()
+                    .stroke(HVTheme.accent.opacity(isMuted ? 0.16 : 0.40), lineWidth: isMuted ? 1 : 2)
+                    .scaleEffect(isMuted ? 1.02 : (pulse ? 1.16 : 1.05))
+                    .opacity(isMuted ? 0.30 : (pulse ? 0.80 : 0.45))
+                    .blur(radius: isMuted ? 0.6 : 2.0)
+                    .animation(isMuted ? .none : .easeInOut(duration: 1.25).repeatForever(autoreverses: true), value: pulse)
 
-            self.isLoading = false
-            self.isPlaying = true
+                Image("hushh_quiet_logo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 34, height: 34)
+                    .opacity(isMuted ? 0.85 : 1.0)
 
-            let utterance = AVSpeechUtterance(string: trimmed)
-            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-            utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
-            self.synth.speak(utterance)
+                if isMuted {
+                    Circle()
+                        .fill(Color.red.opacity(0.92))
+                        .frame(width: 9, height: 9)
+                        .offset(x: 18, y: -18)
+                        .shadow(color: .black.opacity(0.35), radius: 4, x: 0, y: 2)
+                }
+            }
+            .frame(width: 62, height: 62) // smaller like reference
+        }
+        .buttonStyle(.plain)
+        .onAppear { pulse = true }
+        .accessibilityLabel(isMuted ? "Unmute microphone" : "Mute microphone")
+    }
+}
+
+// ======================================================
+// MARK: - ViewModel (Realtime WebRTC)
+// ======================================================
+
+final class KaiVoiceViewModel: NSObject, ObservableObject {
+
+    @Published var state: OrbState = .connecting
+    @Published var isMuted: Bool = false
+    @Published var errorText: String? = nil
+
+    // Orb “mood” configuration
+    @Published var orbConfiguration: OrbConfiguration = KaiVoiceViewModel.makeOrbConfig(state: .connecting, energy: 0.5)
+
+    // Use your shared app base URL
+    private let backendBase: URL = HushhAPI.base
+    // If you want hardcoded:
+    // private let backendBase: URL = URL(string: "https://YOUR_BACKEND")!
+    private var userId: String = ""
+
+    // WebRTC
+    private var factory: LKRTCPeerConnectionFactory?
+    private var peer: LKRTCPeerConnection?
+    private var dataChannel: LKRTCDataChannel?
+    private var localAudioTrack: LKRTCAudioTrack?
+
+    // Config from backend
+    private var instructions: String = ""
+    private var tools: [[String: Any]] = []
+    private var turnDetection: [String: Any] = [:]
+    private var kickoffResponse: [String: Any] = [:]
+    private var hasSentSessionUpdate = false
+
+    // Small speaking detection
+    private var speakingHoldTask: Task<Void, Never>?
+
+    var subtitle: String {
+        switch state {
+        case .connecting: return "Connecting…"
+        case .listening: return isMuted ? "Muted" : "Listening"
+        case .speaking: return "Kai is speaking"
+        case .muted: return "Muted"
+        case .error: return "Connection error"
+        }
+    }
+
+    var footerText: String {
+        switch state {
+        case .connecting:
+            return "Bringing Kai online…"
+        case .error:
+            return "Couldn’t connect. Try again."
+        default:
+            return isMuted ? "Mic muted." : "Kai is live. Speak anytime."
+        }
+    }
+
+    func start(userId: String) {
+        stop()
+        self.userId = userId
+
+        DispatchQueue.main.async {
+            self.state = .connecting
+            self.errorText = nil
+            self.orbConfiguration = Self.makeOrbConfig(state: .connecting, energy: 0.5)
+        }
+
+        Task.detached { [weak self] in
+            guard let self else { return }
+            do {
+                try self.configureAudioSession()
+
+                try await self.fetchConfig()
+                let clientSecret = try await self.fetchClientSecret()
+
+                try await self.connectWebRTC(clientSecret: clientSecret)
+
+                await MainActor.run {
+                    self.state = self.isMuted ? .muted : .listening
+                    self.orbConfiguration = Self.makeOrbConfig(state: self.state, energy: 0.55)
+                }
+            } catch {
+                await MainActor.run {
+                    self.state = .error
+                    self.errorText = error.localizedDescription
+                    self.orbConfiguration = Self.makeOrbConfig(state: .error, energy: 0.3)
+                }
+            }
         }
     }
 
     func stop() {
-        activeToken = UUID()
-        speakTask?.cancel()
-        speakTask = nil
+        speakingHoldTask?.cancel()
+        speakingHoldTask = nil
 
-        if let player, player.isPlaying { player.stop() }
-        player = nil
+        hasSentSessionUpdate = false
 
-        if synth.isSpeaking {
-            synth.stopSpeaking(at: .immediate)
+        dataChannel?.close()
+        dataChannel = nil
+
+        peer?.close()
+        peer = nil
+
+        localAudioTrack = nil
+        factory = nil
+    }
+
+    func setMuted(_ muted: Bool) {
+        if isMuted != muted { isMuted = muted }
+
+        localAudioTrack?.isEnabled = !muted
+
+        if state != .error && state != .connecting {
+            state = muted ? .muted : .listening
+            orbConfiguration = Self.makeOrbConfig(state: state, energy: muted ? 0.35 : 0.55)
+        }
+    }
+
+    // ------------------------------------------------------
+    // Backend: /onboarding/agent/config
+    // ------------------------------------------------------
+
+    private func fetchConfig() async throws {
+        var url = backendBase.appendingPathComponent("/onboarding/agent/config")
+        if !userId.isEmpty, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            components.queryItems = [URLQueryItem(name: "user_id", value: userId)]
+            if let updated = components.url { url = updated }
+        }
+        let (data, resp) = try await URLSession.shared.data(from: url)
+
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw NSError(domain: "KaiConfig", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "Config error"
+            ])
         }
 
-        isLoading = false
-        isPlaying = false
+        guard
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let dataObj = root["data"] as? [String: Any]
+        else {
+            throw NSError(domain: "KaiConfig", code: 2, userInfo: [NSLocalizedDescriptionKey: "Bad config JSON"])
+        }
 
-        deactivateAudioSession()
+        self.instructions = (dataObj["instructions"] as? String) ?? ""
+
+        if let rawTools = dataObj["tools"] as? [[String: Any]] {
+            self.tools = rawTools
+        } else if let rawAny = dataObj["tools"] as? [Any] {
+            self.tools = rawAny.compactMap { $0 as? [String: Any] }
+        } else {
+            self.tools = []
+        }
+
+        if let realtime = dataObj["realtime"] as? [String: Any],
+           let td = realtime["turn_detection"] as? [String: Any] {
+            self.turnDetection = td
+        } else {
+            self.turnDetection = [:]
+        }
+
+        if let kickoff = dataObj["kickoff"] as? [String: Any],
+           let respObj = kickoff["response"] as? [String: Any] {
+            self.kickoffResponse = respObj
+        } else {
+            self.kickoffResponse = [:]
+        }
     }
 
-    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) { stop() }
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) { stop() }
+    // ------------------------------------------------------
+    // Backend: /onboarding/agent/token
+    // ------------------------------------------------------
 
-    private func configureAudioSessionForTTS() {
+    private func fetchClientSecret() async throws -> String {
+        let url = backendBase.appendingPathComponent("/onboarding/agent/token")
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = ["model": "gpt-4o-realtime-preview"]
+        if !userId.isEmpty {
+            body["user_id"] = userId
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw NSError(domain: "KaiToken", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "Token error"
+            ])
+        }
+
+        guard
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let dataObj = root["data"] as? [String: Any],
+            let secret = dataObj["client_secret"] as? String,
+            !secret.isEmpty
+        else {
+            throw NSError(domain: "KaiToken", code: 2, userInfo: [NSLocalizedDescriptionKey: "Bad token JSON"])
+        }
+
+        return secret
+    }
+
+    // ------------------------------------------------------
+    // WebRTC: connect to OpenAI Realtime
+    // ------------------------------------------------------
+
+    private func connectWebRTC(clientSecret: String) async throws {
+        factory = LKRTCPeerConnectionFactory()
+
+        let rtcConfig = LKRTCConfiguration()
+        rtcConfig.sdpSemantics = .unifiedPlan
+
+        let constraints = LKRTCMediaConstraints(
+            mandatoryConstraints: nil,
+            optionalConstraints: ["DtlsSrtpKeyAgreement": "true"]
+        )
+
+        guard let peer = factory?.peerConnection(with: rtcConfig, constraints: constraints, delegate: self) else {
+            throw NSError(domain: "WebRTC", code: 10, userInfo: [NSLocalizedDescriptionKey: "PeerConnection failed"])
+        }
+        self.peer = peer
+
+        // Local audio track
+        let audioSource = factory!.audioSource(with: LKRTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil))
+        let audioTrack = factory!.audioTrack(with: audioSource, trackId: "audio0")
+        self.localAudioTrack = audioTrack
+        audioTrack.isEnabled = !isMuted
+        _ = peer.add(audioTrack, streamIds: ["stream0"])
+
+        // Data channel
+        let dcConfig = LKRTCDataChannelConfiguration()
+        dcConfig.isOrdered = true
+        guard let dc = peer.dataChannel(forLabel: "oai-events", configuration: dcConfig) else {
+            throw NSError(domain: "WebRTC", code: 11, userInfo: [NSLocalizedDescriptionKey: "DataChannel failed"])
+        }
+        self.dataChannel = dc
+        dc.delegate = self
+
+        // Create offer
+        let offer = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<LKRTCSessionDescription, Error>) in
+            peer.offer(for: LKRTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)) { sdp, err in
+                if let err = err { cont.resume(throwing: err); return }
+                guard let sdp = sdp else {
+                    cont.resume(throwing: NSError(domain: "WebRTC", code: 12, userInfo: [NSLocalizedDescriptionKey: "Offer SDP nil"]))
+                    return
+                }
+                cont.resume(returning: sdp)
+            }
+        }
+
+        // Set local
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            peer.setLocalDescription(offer) { err in
+                if let err = err { cont.resume(throwing: err); return }
+                cont.resume(returning: ())
+            }
+        }
+
+        // Exchange SDP with OpenAI
+        let answerSdp = try await postOfferToOpenAI(clientSecret: clientSecret, offerSdp: offer.sdp)
+
+        let answer = LKRTCSessionDescription(type: .answer, sdp: answerSdp)
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            peer.setRemoteDescription(answer) { err in
+                if let err = err { cont.resume(throwing: err); return }
+                cont.resume(returning: ())
+            }
+        }
+    }
+
+    private func postOfferToOpenAI(clientSecret: String, offerSdp: String) async throws -> String {
+        guard let url = URL(string: "https://api.openai.com/v1/realtime/calls") else {
+            throw URLError(.badURL)
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(clientSecret)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/sdp", forHTTPHeaderField: "Content-Type")
+        req.setValue("realtime=v1", forHTTPHeaderField: "OpenAI-Beta")
+        req.httpBody = offerSdp.data(using: .utf8)
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw NSError(domain: "OpenAIRealtime", code: 20, userInfo: [
+                NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "SDP exchange error"
+            ])
+        }
+
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    // ------------------------------------------------------
+    // AEC: Audio session
+    // ------------------------------------------------------
+
+    private func configureAudioSession() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
+        try session.setActive(true, options: [])
+    }
+
+    // ------------------------------------------------------
+    // DataChannel helpers
+    // ------------------------------------------------------
+
+    private func sendEvent(_ obj: [String: Any]) {
+        guard let dc = dataChannel, dc.readyState == .open else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        dc.sendData(LKRTCDataBuffer(data: data, isBinary: false))
+    }
+
+    private func sendSessionUpdateOnce() {
+        guard !hasSentSessionUpdate else { return }
+        guard !instructions.isEmpty else { return }
+
+        hasSentSessionUpdate = true
+
+        var session: [String: Any] = [
+            "modalities": ["audio", "text"],
+            "instructions": instructions,
+            "tools": tools
+        ]
+        if let td = sanitizedTurnDetection() {
+            session["turn_detection"] = td
+        }
+
+        sendEvent([
+            "type": "session.update",
+            "session": session
+        ])
+
+        sendEvent([
+            "type": "response.create",
+            "response": kickoffResponse.isEmpty
+            ? [
+                "modalities": ["audio", "text"],
+                "instructions": "Hi, I’m Kai. Let’s begin. Before we talk about investing, what does your net worth look like and how is it split across assets?"
+              ]
+            : kickoffResponse
+        ])
+    }
+
+    private func sanitizedTurnDetection() -> [String: Any]? {
+        guard !turnDetection.isEmpty else { return nil }
+        var td = turnDetection
+
+        if let raw = td["threshold"] {
+            let doubleValue: Double?
+            switch raw {
+            case let num as NSNumber:
+                doubleValue = num.doubleValue
+            case let str as String:
+                doubleValue = Double(str)
+            default:
+                doubleValue = nil
+            }
+
+            if let value = doubleValue {
+                let rounded = (value * 1e16).rounded() / 1e16
+                td["threshold"] = rounded
+            } else {
+                td.removeValue(forKey: "threshold")
+            }
+        }
+
+        return td.isEmpty ? nil : td
+    }
+
+    private func handleToolCallEvent(_ obj: [String: Any]) {
+        guard !userId.isEmpty else { return }
+
+        let callId = (obj["call_id"] as? String)
+            ?? (obj["id"] as? String)
+            ?? (obj["call"] as? [String: Any])?["id"] as? String
+        let toolName = (obj["name"] as? String)
+            ?? (obj["tool_name"] as? String)
+            ?? (obj["call"] as? [String: Any])?["name"] as? String
+
+        guard let callId, let toolName else { return }
+
+        let arguments: Any
+        if let argsDict = obj["arguments"] as? [String: Any] {
+            arguments = argsDict
+        } else if let argsArray = obj["arguments"] as? [Any] {
+            arguments = argsArray
+        } else if let argsString = obj["arguments"] as? String,
+                  let data = argsString.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) {
+            arguments = json
+        } else if let argsString = obj["arguments"] as? String {
+            arguments = ["raw": argsString]
+        } else {
+            arguments = [:]
+        }
+
+        Task.detached { [weak self] in
+            await self?.forwardToolCall(callId: callId, toolName: toolName, arguments: arguments)
+        }
+    }
+
+    private func forwardToolCall(callId: String, toolName: String, arguments: Any) async {
+        guard !userId.isEmpty else { return }
+        let url = backendBase.appendingPathComponent("/onboarding/agent/tool")
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let payload: [String: Any] = [
+            "user_id": userId,
+            "tool_name": toolName,
+            "arguments": arguments
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
         do {
-            try AVAudioSession.sharedInstance().setCategory(
-                .playback,
-                mode: .spokenAudio,
-                options: [.duckOthers, .defaultToSpeaker, .allowBluetooth]
-            )
-            try AVAudioSession.sharedInstance().setActive(true, options: [])
-        } catch { }
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                let msg = String(data: data, encoding: .utf8) ?? "Tool error"
+                sendEvent([
+                    "type": "response.function_call_output",
+                    "call_id": callId,
+                    "output": ["error": msg]
+                ])
+                return
+            }
+
+            let output: Any
+            if let json = try? JSONSerialization.jsonObject(with: data) {
+                if let dict = json as? [String: Any], let inner = dict["output"] {
+                    output = inner
+                } else {
+                    output = json
+                }
+            } else {
+                output = String(data: data, encoding: .utf8) ?? ""
+            }
+
+            sendEvent([
+                "type": "response.function_call_output",
+                "call_id": callId,
+                "output": output
+            ])
+        } catch {
+            sendEvent([
+                "type": "response.function_call_output",
+                "call_id": callId,
+                "output": ["error": error.localizedDescription]
+            ])
+        }
     }
 
-    private func deactivateAudioSession() {
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    private func markSpeakingPulse() {
+        guard !isMuted else { return }
+
+        if state != .speaking {
+            state = .speaking
+            orbConfiguration = Self.makeOrbConfig(state: .speaking, energy: 0.85)
+        }
+
+        speakingHoldTask?.cancel()
+        speakingHoldTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 700_000_000) // 0.7s hold
+            if self.state == .speaking {
+                self.state = self.isMuted ? .muted : .listening
+                self.orbConfiguration = Self.makeOrbConfig(state: self.state, energy: self.isMuted ? 0.35 : 0.55)
+            }
+        }
+    }
+
+    // Orb config mapping
+    static func makeOrbConfig(state: OrbState, energy: Double) -> OrbConfiguration {
+        // Blue/purple like reference
+        let bg: [Color] = [.purple, .blue, .indigo]
+        let glow = Color.white
+
+        let speed: Double
+        let core: Double
+
+        switch state {
+        case .connecting:
+            speed = 22
+            core = 0.8
+        case .listening:
+            speed = 45
+            core = 1.0
+        case .speaking:
+            speed = 90
+            core = 1.6
+        case .muted:
+            speed = 18
+            core = 0.6
+        case .error:
+            speed = 10
+            core = 0.4
+        }
+
+        return OrbConfiguration(
+            backgroundColors: bg,
+            glowColor: glow,
+            coreGlowIntensity: core * energy,
+            showBackground: true,
+            showWavyBlobs: true,
+            showParticles: true,
+            showGlowEffects: true,
+            showShadow: true,
+            speed: speed
+        )
     }
 }
 
 // ======================================================
-// MARK: - STTController (fix “Cannot find in scope”)
+// MARK: - LKRTCPeerConnectionDelegate
 // ======================================================
 
-@MainActor
-final class STTController: ObservableObject {
-    @Published var transcript: String = ""
-    @Published var isRecording: Bool = false
+extension KaiVoiceViewModel: LKRTCPeerConnectionDelegate {
 
-    private let recognizer: SFSpeechRecognizer?
-    private var audioEngine: AVAudioEngine?
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var task: SFSpeechRecognitionTask?
+    func peerConnection(_ peerConnection: LKRTCPeerConnection, didChange stateChanged: LKRTCSignalingState) {}
+    func peerConnection(_ peerConnection: LKRTCPeerConnection, didAdd stream: LKRTCMediaStream) {}
+    func peerConnection(_ peerConnection: LKRTCPeerConnection, didRemove stream: LKRTCMediaStream) {}
+    func peerConnectionShouldNegotiate(_ peerConnection: LKRTCPeerConnection) {}
+    func peerConnection(_ peerConnection: LKRTCPeerConnection, didChange newState: LKRTCIceConnectionState) {}
+    func peerConnection(_ peerConnection: LKRTCPeerConnection, didChange newState: LKRTCIceGatheringState) {}
+    func peerConnection(_ peerConnection: LKRTCPeerConnection, didGenerate candidate: LKRTCIceCandidate) {}
+    func peerConnection(_ peerConnection: LKRTCPeerConnection, didRemove candidates: [LKRTCIceCandidate]) {}
 
-    init(localeID: String) {
-        self.recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeID))
+    func peerConnection(_ peerConnection: LKRTCPeerConnection, didOpen dataChannel: LKRTCDataChannel) {
+        self.dataChannel = dataChannel
+        dataChannel.delegate = self
     }
 
-    func start() async throws {
-        stop(commit: false) { _ in }
+    func peerConnection(_ peerConnection: LKRTCPeerConnection, didStartReceivingOn transceiver: LKRTCRtpTransceiver) {
+        // Remote audio plays automatically through WebRTC once connected.
+    }
+}
 
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(
-            .playAndRecord,
-            mode: .measurement,
-            options: [.duckOthers, .defaultToSpeaker, .allowBluetooth]
-        )
-        try session.setActive(true, options: [])
+// ======================================================
+// MARK: - LKRTCDataChannelDelegate
+// ======================================================
 
-        transcript = ""
-        isRecording = true
+extension KaiVoiceViewModel: LKRTCDataChannelDelegate {
 
-        let engine = AVAudioEngine()
-        audioEngine = engine
-
-        let req = SFSpeechAudioBufferRecognitionRequest()
-        req.shouldReportPartialResults = true
-        request = req
-
-        let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            self?.request?.append(buffer)
-        }
-
-        engine.prepare()
-        try engine.start()
-
-        task = recognizer?.recognitionTask(with: req) { [weak self] result, error in
-            guard let self else { return }
-
-            if let result {
-                Task { @MainActor in
-                    self.transcript = result.bestTranscription.formattedString
-                }
+    func dataChannelDidChangeState(_ dataChannel: LKRTCDataChannel) {
+        if dataChannel.readyState == .open {
+            DispatchQueue.main.async {
+                self.state = self.isMuted ? .muted : .listening
+                self.orbConfiguration = Self.makeOrbConfig(state: self.state, energy: self.isMuted ? 0.35 : 0.55)
             }
-
-            if error != nil {
-                Task { @MainActor in
-                    self.stop(commit: true) { _ in }
-                }
-            }
+            sendSessionUpdateOnce()
         }
     }
 
-    func stop(commit: Bool, onFinal: (String) -> Void) {
-        guard isRecording || audioEngine != nil || task != nil || request != nil else { return }
+    func dataChannel(_ dataChannel: LKRTCDataChannel, didReceiveMessageWith buffer: LKRTCDataBuffer) {
+        guard !buffer.isBinary else { return }
+        guard let text = String(data: buffer.data, encoding: .utf8) else { return }
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return }
 
-        let final = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let type = (obj["type"] as? String) ?? ""
 
-        if let engine = audioEngine, engine.isRunning { engine.stop() }
-        audioEngine?.inputNode.removeTap(onBus: 0)
+        // Mark speaking based on response activity (best-effort)
+        if type.hasPrefix("response.") && type.contains("delta") {
+            DispatchQueue.main.async { self.markSpeakingPulse() }
+        }
 
-        request?.endAudio()
-        task?.cancel()
+        if type.contains("function_call_arguments.done") || type.contains("tool_call_arguments.done") {
+            handleToolCallEvent(obj)
+        }
 
-        audioEngine = nil
-        request = nil
-        task = nil
-
-        isRecording = false
-
-        if commit, !final.isEmpty { onFinal(final) }
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        if type == "error" {
+            let errMsg = (obj["error"] as? [String: Any])?["message"] as? String
+            if let errMsg, errMsg.contains("turn_detection.threshold") || errMsg.contains("max decimal places") {
+                return
+            }
+            DispatchQueue.main.async {
+                self.state = .error
+                self.errorText = errMsg ?? "Realtime error"
+                self.orbConfiguration = Self.makeOrbConfig(state: .error, energy: 0.35)
+            }
+        }
     }
 }

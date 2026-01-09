@@ -120,8 +120,9 @@ struct SiriAskError: Decodable {
 // ======================================================
 
 enum HushhAPI {
-    static let base = URL(string: "https://hushhvoice-1.onrender.com")!
-//    static let base = URL(string: "https://ba447a583e5b.ngrok-free.app")!
+    // static let base = URL(string: "https://hushhvoice-1.onrender.com")!
+   static let base = URL(string: "https://6e502fe4abe4.ngrok-free.app")!
+    
     
     static let appJWT = "Bearer dev-demo-app-jwt"
 
