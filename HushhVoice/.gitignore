@@ -1,0 +1,31 @@
+.DS_Store
+.AppleDouble
+.LSOverride
+
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+DerivedData/
+build/
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+.swiftpm/
+
+# Carthage
+Carthage/Build/
+
+# CocoaPods
+Pods/
+
+# fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/

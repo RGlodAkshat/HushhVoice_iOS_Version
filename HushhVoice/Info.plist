@@ -7,5 +7,7 @@
 	<key>SB_URL</key>
 	<string>https://cvfhnyvpomberwcjddcp.supabase.co
 </string>
+	<key>NSCameraUsageDescription</key>
+	<string>HushhVoice can use the camera for profile verification and in-app capture when enabled.</string>
 </dict>
 </plist>
