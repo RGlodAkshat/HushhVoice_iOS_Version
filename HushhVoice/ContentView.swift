@@ -1,7 +1,8 @@
 //
 //  ContentView.swift
 //  HushhVoice
-//
+// yiy erfefr
+//  Main chat UI + models + networking + auth helpers.
 
 import SwiftUI
 import Foundation
@@ -15,6 +16,7 @@ import AppIntents
 // MARK: - THEME
 // ======================================================
 
+// Centralized colors and layout constants for consistent styling.
 enum HVTheme {
     private static var _isDark: Bool = true
 
@@ -62,6 +64,7 @@ enum HVTheme {
 // MARK: - MODELS & DTOs
 // ======================================================
 
+// Chat message model used throughout the UI and persistence.
 struct Message: Identifiable, Codable, Equatable {
     enum Role: String, Codable { case user, assistant }
     let id: UUID
@@ -77,6 +80,7 @@ struct Message: Identifiable, Codable, Equatable {
     }
 }
 
+// Chat thread model that holds a list of messages.
 struct Chat: Identifiable, Codable, Equatable {
     var id: UUID
     var title: String
@@ -99,6 +103,7 @@ struct Chat: Identifiable, Codable, Equatable {
     }
 }
 
+// Decoding models for the /siri/ask API response.
 struct SiriAskResponse: Decodable {
     let ok: Bool
     let data: SiriAskData?
@@ -119,14 +124,16 @@ struct SiriAskError: Decodable {
 // MARK: - API LAYER
 // ======================================================
 
+// Lightweight network client for your backend.
 enum HushhAPI {
-    // static let base = URL(string: "https://hushhvoice-1.onrender.com")!
-   static let base = URL(string: "https://6e502fe4abe4.ngrok-free.app")!
+    static let base = URL(string: "https://hushhvoice-1.onrender.com")!
+//    static let base = URL(string: "https://03d925e4dffe.ngrok-free.app")!
     
     
     static let appJWT = "Bearer dev-demo-app-jwt"
 
     static func ask(prompt: String, googleToken: String?) async throws -> SiriAskData {
+        // Build the request for the ask endpoint.
         var req = URLRequest(url: base.appendingPathComponent("/siri/ask"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -141,6 +148,7 @@ enum HushhAPI {
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
+        // Perform the network call.
         let (data, resp) = try await URLSession.shared.data(for: req)
 
         if let http = resp as? HTTPURLResponse {
@@ -155,6 +163,7 @@ enum HushhAPI {
             print("📩 RAW /siri/ask RESPONSE (non-UTF8, size \(data.count) bytes)")
         }
 
+        // Validate HTTP status before decoding.
         guard let http = resp as? HTTPURLResponse else { throw URLError(.badServerResponse) }
 
         guard (200..<300).contains(http.statusCode) else {
@@ -164,6 +173,7 @@ enum HushhAPI {
                           userInfo: [NSLocalizedDescriptionKey: msg])
         }
 
+        // Decode JSON into Swift structs.
         let result = try JSONDecoder().decode(SiriAskResponse.self, from: data)
 
         print("🧩 Decoded SiriAskResponse.ok = \(result.ok)")
@@ -178,6 +188,7 @@ enum HushhAPI {
     }
 
     static func tts(text: String, voice: String? = nil) async throws -> Data {
+        // Request audio data from backend TTS.
         var req = URLRequest(url: base.appendingPathComponent("/tts"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -198,14 +209,24 @@ enum HushhAPI {
         return data
     }
 
-    static func deleteAccount(googleToken: String?, appleUserID: String?) async throws {
+    static func deleteAccount(googleToken: String?, appleUserID: String?, kaiUserID: String?) async throws {
+        // Tell backend to delete the account associated with tokens/IDs.
         var req = URLRequest(url: base.appendingPathComponent("/account/delete"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         var payload: [String: Any] = [:]
         if let googleToken { payload["google_access_token"] = googleToken }
-        if let appleUserID, !appleUserID.isEmpty { payload["apple_user_id"] = appleUserID }
+        if let appleUserID, !appleUserID.isEmpty {
+            payload["apple_user_id"] = appleUserID
+            payload["user_id"] = appleUserID
+        }
+        if let kaiUserID, !kaiUserID.isEmpty {
+            payload["kai_user_id"] = kaiUserID
+            if payload["user_id"] == nil {
+                payload["user_id"] = kaiUserID
+            }
+        }
 
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
@@ -223,6 +244,7 @@ enum HushhAPI {
 // MARK: - GOOGLE OAUTH (PKCE flow + REFRESH)
 // ======================================================
 
+// Handles Google OAuth sign-in, refresh, and token storage.
 @MainActor
 final class GoogleSignInManager: NSObject, ObservableObject {
     static let shared = GoogleSignInManager()
@@ -234,18 +256,22 @@ final class GoogleSignInManager: NSObject, ObservableObject {
         isSignedIn || accessToken != nil || defaults.string(forKey: tokenKey) != nil
     }
 
+    // UserDefaults keys for token storage.
     private let tokenKey = "google_access_token"
     private let refreshTokenKey = "google_refresh_token"
     private let expiryKey = "google_token_expiry"
 
+    // App Group lets the main app and extensions share tokens.
     private let appGroupID = "group.ai.hushh.hushhvoice"
     private var defaults: UserDefaults { UserDefaults(suiteName: appGroupID) ?? .standard }
 
+    // OAuth client details from Google Cloud Console.
     private let clientID =
         "1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9.apps.googleusercontent.com"
     private let redirectURI =
         "com.googleusercontent.apps.1042954531759-s0cgfui9ss2o2kvpvfssu2k81gtjpop9:/oauthredirect"
 
+    // OAuth scopes for Gmail + Calendar.
     private let scopes = [
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.send",
@@ -257,6 +283,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     private var codeVerifier: String?
 
     func loadFromDisk() {
+        // Load token from disk so UI can show signed-in state.
         if let token = defaults.string(forKey: tokenKey) {
             accessToken = token
             isSignedIn = true
@@ -266,6 +293,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     }
 
     func signOut() {
+        // Clear in-memory and persisted tokens.
         accessToken = nil
         isSignedIn = false
         defaults.removeObject(forKey: tokenKey)
@@ -274,6 +302,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     }
 
     func disconnect() async {
+        // Revoke token on Google side, then clear local state.
         let tokenToRevoke = accessToken ?? defaults.string(forKey: tokenKey)
         if let tokenToRevoke, let url = URL(string: "https://oauth2.googleapis.com/revoke?token=\(tokenToRevoke)") {
             var req = URLRequest(url: url)
@@ -291,6 +320,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     }
 
     private func saveTokens(accessToken: String, refreshToken: String?, expiresIn: TimeInterval?) {
+        // Persist access token, optional refresh token, and expiry.
         self.accessToken = accessToken
         defaults.set(accessToken, forKey: tokenKey)
 
@@ -305,6 +335,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     }
 
     func ensureValidAccessToken() async -> String? {
+        // Use cached token if valid, otherwise refresh.
         if accessToken == nil && defaults.string(forKey: tokenKey) != nil {
             print("🔵 ensureValidAccessToken: loading from disk for this process")
             loadFromDisk()
@@ -338,6 +369,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     }
 
     private func refreshAccessToken(refreshToken: String) async throws -> String {
+        // Token refresh via OAuth endpoint.
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
         request.httpMethod = "POST"
 
@@ -379,6 +411,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     }
 
     func signIn() {
+        // Start the OAuth PKCE flow in a web authentication session.
         let state = UUID().uuidString
 
         let verifier = generateCodeVerifier()
@@ -443,6 +476,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     }
 
     private func exchangeCodeForToken(code: String) async {
+        // Exchange auth code for access/refresh tokens.
         guard let verifier = codeVerifier else {
             print("Missing PKCE codeVerifier when exchanging token")
             return
@@ -500,6 +534,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     }
 
     private func generateCodeVerifier() -> String {
+        // PKCE code verifier: random, URL-safe string.
         var data = Data(count: 32)
         let result = data.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
         if result != errSecSuccess { return base64url(Data(UUID().uuidString.utf8)) }
@@ -507,12 +542,14 @@ final class GoogleSignInManager: NSObject, ObservableObject {
     }
 
     private func codeChallenge(from verifier: String) -> String {
+        // PKCE code challenge derived from verifier.
         let data = Data(verifier.utf8)
         let hashed = SHA256.hash(data: data)
         return base64url(Data(hashed))
     }
 
     private func base64url(_ data: Data) -> String {
+        // Base64 URL-safe encoding (no padding).
         data.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
@@ -521,6 +558,7 @@ final class GoogleSignInManager: NSObject, ObservableObject {
 }
 
 extension GoogleSignInManager: ASWebAuthenticationPresentationContextProviding {
+    // Provide a window for presenting the web auth session.
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
@@ -533,6 +571,7 @@ extension GoogleSignInManager: ASWebAuthenticationPresentationContextProviding {
 // MARK: - SPEECH MANAGER (TTS + Stop + State)
 // ===================================================
 
+// Plays backend TTS audio and falls back to system speech.
 final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AVSpeechSynthesizerDelegate {
     static let shared = SpeechManager()
 
@@ -545,10 +584,12 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
 
     override init() {
         super.init()
+        // Listen for synth completion callbacks.
         synth.delegate = self
     }
 
     func speak(_ text: String, messageID: UUID?) {
+        // Public entry point: trims input then speaks.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         Task { await speakAsync(trimmed, messageID: messageID) }
@@ -557,6 +598,7 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
     func stop() { Task { await MainActor.run { self.stopAllInternal() } } }
 
     private func speakAsync(_ text: String, messageID: UUID?) async {
+        // Reset state and configure audio session.
         await MainActor.run {
             self.stopAllInternal()
             self.currentMessageID = messageID
@@ -566,6 +608,7 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
         }
 
         do {
+            // Prefer backend TTS audio (better voice).
             let audioData = try await HushhAPI.tts(text: text, voice: "alloy")
             try await MainActor.run {
                 self.player = try AVAudioPlayer(data: audioData)
@@ -577,6 +620,7 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
             }
             return
         } catch {
+            // If backend fails, fall back to system voice.
             print("🔴 Backend TTS failed, falling back to system voice: \(error)")
         }
 
@@ -593,6 +637,7 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
     }
 
     private func configureAudioSession() {
+        // Configure audio for spoken audio with speaker + Bluetooth.
         do {
             try AVAudioSession.sharedInstance().setCategory(
                 .playAndRecord,
@@ -606,6 +651,7 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
     }
 
     private func stopAllInternal() {
+        // Stop any active audio and reset state flags.
         if let player, player.isPlaying { player.stop() }
         if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
 
@@ -622,10 +668,12 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        // Clean up when playback ends.
         Task { await MainActor.run { self.stopAllInternal() } }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        // Clean up when system voice finishes.
         Task { await MainActor.run { self.stopAllInternal() } }
     }
 }
@@ -634,6 +682,7 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
 // MARK: - STORE
 // ======================================================
 
+// Manages chats, persistence, and message sending.
 @MainActor
 final class ChatStore: ObservableObject {
     @Published private(set) var chats: [Chat] = []
@@ -643,6 +692,7 @@ final class ChatStore: ObservableObject {
     private let legacySingleThreadKey = "chat_history_v1"
 
     init() {
+        // Load saved chats or create a default one.
         load()
         migrateLegacyIfNeeded()
 
@@ -657,6 +707,7 @@ final class ChatStore: ObservableObject {
     }
 
     var activeChat: Chat? {
+        // Convenience for the selected chat.
         guard let id = activeChatID else { return nil }
         return chats.first(where: { $0.id == id })
     }
@@ -664,6 +715,7 @@ final class ChatStore: ObservableObject {
     var activeMessages: [Message] { activeChat?.messages ?? [] }
 
     func newChat(select: Bool = true) {
+        // Create a new chat thread.
         let c = Chat()
         chats.insert(c, at: 0)
         if select { activeChatID = c.id }
@@ -673,6 +725,7 @@ final class ChatStore: ObservableObject {
     func selectChat(_ chatID: UUID) { activeChatID = chatID }
 
     func deleteChat(_ chatID: UUID) {
+        // Remove a chat and select a fallback if needed.
         let wasActive = (activeChatID == chatID)
         chats.removeAll { $0.id == chatID }
         if wasActive { activeChatID = chats.first?.id }
@@ -681,6 +734,7 @@ final class ChatStore: ObservableObject {
     }
 
     func renameChat(_ chatID: UUID, to newTitle: String) {
+        // Update the chat title and move it to the top.
         guard let idx = chats.firstIndex(where: { $0.id == chatID }) else { return }
         let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         chats[idx].title = title.isEmpty ? "Untitled" : title
@@ -691,6 +745,7 @@ final class ChatStore: ObservableObject {
     }
 
     func send(_ text: String, googleToken: String?) async {
+        // Add user message, call backend, then append assistant reply.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let id = activeChatID,
@@ -725,6 +780,7 @@ final class ChatStore: ObservableObject {
     }
 
     func regenerate(at assistantMessageID: UUID, googleToken: String?) async {
+        // Re-run the backend for the latest user message.
         guard let chatID = activeChatID,
               let chatIdx = chats.firstIndex(where: { $0.id == chatID }),
               let aIdx = chats[chatIdx].messages.firstIndex(where: { $0.id == assistantMessageID && $0.role == .assistant })
@@ -754,6 +810,7 @@ final class ChatStore: ObservableObject {
     }
 
     func clearMessagesInActiveChat() {
+        // Remove all messages but keep the chat itself.
         guard let id = activeChatID,
               let idx = chats.firstIndex(where: { $0.id == id })
         else { return }
@@ -774,6 +831,7 @@ final class ChatStore: ObservableObject {
     }
 
     private func load() {
+        // Load chat history from UserDefaults.
         if let raw = UserDefaults.standard.data(forKey: chatsKey) {
             do {
                 let decoded = try JSONDecoder().decode([Chat].self, from: raw)
@@ -786,6 +844,7 @@ final class ChatStore: ObservableObject {
     }
 
     private func save() {
+        // Persist chat history to UserDefaults.
         do {
             let data = try JSONEncoder().encode(chats)
             UserDefaults.standard.set(data, forKey: chatsKey)
@@ -795,6 +854,7 @@ final class ChatStore: ObservableObject {
     }
 
     private func migrateLegacyIfNeeded() {
+        // Migrate older single-thread format to multi-chat format.
         guard chats.isEmpty,
               let raw = UserDefaults.standard.data(forKey: legacySingleThreadKey),
               let decoded = try? JSONDecoder().decode([Message].self, from: raw),
@@ -809,6 +869,7 @@ final class ChatStore: ObservableObject {
     }
 
     private func buildContextualPrompt(forChatIndex idx: Int, newUserMessage: String, maxHistory: Int = 8) -> String {
+        // Build a prompt that includes recent history for better answers.
         let history = chats[idx].messages.suffix(maxHistory)
 
         var convoLines: [String] = []
@@ -832,6 +893,7 @@ final class ChatStore: ObservableObject {
     }
 
     private static func initialWordsTitle(from text: String, maxWords: Int = 6, maxChars: Int = 42) -> String {
+        // Create a short title from the first words of the message.
         let words = text.split(whereSeparator: { $0.isNewline || $0.isWhitespace })
         let first = words.prefix(maxWords).joined(separator: " ")
         let trimmed = first.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -845,6 +907,7 @@ final class ChatStore: ObservableObject {
 // MARK: - STREAMING MARKDOWN VIEW
 // ======================================================
 
+// Displays text with a simple streaming/typing effect and basic **bold** parsing.
 struct StreamingMarkdownText: View {
     let fullText: String
     let animate: Bool
@@ -854,6 +917,7 @@ struct StreamingMarkdownText: View {
     @State private var started = false
 
     var body: some View {
+        // Render whatever text is currently visible.
         renderedText(from: visibleText)
             .textSelection(.enabled)
             .onAppear {
@@ -864,6 +928,7 @@ struct StreamingMarkdownText: View {
     }
 
     private func startTyping() {
+        // Reveal one character at a time to simulate typing.
         visibleText = ""
         Task {
             for ch in fullText {
@@ -875,6 +940,7 @@ struct StreamingMarkdownText: View {
     }
 
     private func renderedText(from text: String) -> Text {
+        // Naive Markdown: only handles **bold** segments.
         guard text.contains("**") else { return Text(text) }
 
         var result = Text("")
@@ -903,6 +969,7 @@ struct StreamingMarkdownText: View {
 // MARK: - HEADER (clean)
 // ======================================================
 
+// Top app bar with menu toggle and quick link button.
 struct HeaderBar: View {
     var onToggleSidebar: (() -> Void)?
     var onGoToHushhTech: (() -> Void)?
@@ -944,6 +1011,7 @@ struct HeaderBar: View {
 // MARK: - MESSAGE ROW
 // ======================================================
 
+// Renders a single chat message (user vs assistant styles).
 struct MessageRow: View {
     let message: Message
     let isLastAssistant: Bool
@@ -959,6 +1027,7 @@ struct MessageRow: View {
     var body: some View { isUser ? AnyView(userRow) : AnyView(assistantRow) }
 
     private var userRow: some View {
+        // Right-aligned bubble for the user.
         VStack(alignment: .trailing, spacing: 4) {
             HStack(spacing: 6) {
                 Spacer(minLength: 0)
@@ -990,6 +1059,7 @@ struct MessageRow: View {
     }
 
     private var assistantRow: some View {
+        // Left-aligned bubble for the assistant + action buttons.
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .bottom, spacing: 8) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -1057,6 +1127,7 @@ struct MessageRow: View {
 // MARK: - COMPOSER
 // ======================================================
 
+// Input field and send button at the bottom of the chat.
 struct ComposerView: View {
     @Binding var text: String
     var isSending: Bool
@@ -1110,6 +1181,7 @@ struct ComposerView: View {
 // MARK: - TYPING INDICATOR
 // ======================================================
 
+// Simple animated dots to show "assistant is typing".
 struct TypingIndicatorView: View {
     @State private var scale: CGFloat = 0.2
 
@@ -1137,6 +1209,7 @@ struct TypingIndicatorView: View {
 // MARK: - SIDEBAR
 // ======================================================
 
+// Sidebar listing chats with rename/delete actions.
 struct ChatSidebar: View {
     @ObservedObject var store: ChatStore
     @Binding var showingSettings: Bool
@@ -1290,6 +1363,7 @@ struct ChatSidebar: View {
     }
 
     private func commitInlineRename(_ chatID: UUID) {
+        // Save inline rename edits.
         let newTitle = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
         store.renameChat(chatID, to: newTitle)
         renamingChatID = nil
@@ -1298,6 +1372,7 @@ struct ChatSidebar: View {
 }
 
 fileprivate extension View {
+    // Helper to show the iOS 17 rename alert when available.
     func ifAvailableiOS17RenameAlert(
         show: Binding<Bool>,
         title: Binding<String>,
@@ -1315,6 +1390,7 @@ fileprivate struct RenameAlertModifier: ViewModifier {
     var onCancel: () -> Void
 
     func body(content: Content) -> some View {
+        // Use the native iOS 17 alert with a text field.
         if #available(iOS 17.0, *) {
             content.alert("Rename Chat", isPresented: $show) {
                 TextField("Title", text: $title)
@@ -1331,6 +1407,7 @@ fileprivate struct RenameAlertModifier: ViewModifier {
 // MARK: - ONBOARDING / HOW-TO VIEW
 // ======================================================
 
+// Static "how to use" guide shown from settings.
 struct OnboardingView: View {
     @Environment(\.dismiss) var dismiss
 
@@ -1413,6 +1490,7 @@ struct OnboardingView: View {
 // MARK: - SETTINGS VIEW
 // ======================================================
 
+// Settings screen: theme, integrations, account, help.
 struct SettingsView: View {
     @Environment(\.dismiss) var dismiss
     @Binding var isDarkMode: Bool
@@ -1526,7 +1604,6 @@ struct SettingsView: View {
                         Text("Delete Account")
                     }
                 }
-
                 Section("Help") {
                     Button { showHelpSheet = true } label: {
                         HStack {
@@ -1565,138 +1642,191 @@ struct SettingsView: View {
 // MARK: - AUTH GATE (REPLACE THIS WHOLE VIEW)
 // ======================================================
 
+// Landing gate shown before user signs in or chooses guest mode.
 struct AuthGateView: View {
     @ObservedObject private var google = GoogleSignInManager.shared
-    @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
     @AppStorage("hushh_guest_mode") private var isGuest: Bool = false
+    @State private var breathe = false
+    @State private var appeared = false
 
     private var tagline: String {
-        "Your data. Your business. In voice mode."
+        "Your data. Your intelligence. In voice mode."
     }
 
     var body: some View {
-        VStack(spacing: 22) {
+        VStack(spacing: 24) {
             Spacer()
 
-            // ✅ LOGO PLACEHOLDER
-            // 1) Add your circular “quiet emoji” logo to Assets.xcassets
-            // 2) Name it: hushh_quiet_logo
-            // 3) Uncomment the Image(...) below
-            ZStack {
-                Circle()
-                    .fill(Color.white.opacity(0.10))
-                    .frame(width: 120, height: 120)
-                    .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+            VStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    HVTheme.surfaceAlt.opacity(0.9),
+                                    HVTheme.surfaceAlt.opacity(0.6)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 136, height: 136)
+                        .overlay(Circle().stroke(Color.white.opacity(0.10), lineWidth: 1))
+                        .background(
+                            RadialGradient(
+                                colors: [HVTheme.accent.opacity(0.25), .clear],
+                                center: .center,
+                                startRadius: 12,
+                                endRadius: 120
+                            )
+                        )
 
-                 Image("hushh_quiet_logo")
-                     .resizable()
-                     .scaledToFit()
-                     .frame(width: 92, height: 92)
+                    Image("hushh_quiet_logo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 96, height: 96)
+                        .shadow(color: .black.opacity(0.2), radius: 8, x: 0, y: 6)
+                }
+                .scaleEffect(breathe ? 1.02 : 0.98)
+                .opacity(breathe ? 1.0 : 0.85)
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 7).repeatForever(autoreverses: true)) {
+                        breathe = true
+                    }
+                }
+
+                VStack(spacing: 10) {
+                    Text("HushhVoice")
+                        .font(.system(size: 40, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+
+                    Text(tagline)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 26)
+                }
             }
-            .padding(.bottom, 6)
+            .padding(.bottom, 8)
 
-            // ✅ TITLE + TAGLINE
-            VStack(spacing: 10) {
-                Text("HushhVoice")
-                    .font(.system(size: 40, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-
-                Text(tagline)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 18)
-            }
-
-            // ✅ BUTTONS
             VStack(spacing: 14) {
                 Button {
                     isGuest = false
                     google.signIn()
                 } label: {
-                    HStack(spacing: 10) {
+                    HStack(spacing: 12) {
                         Image(systemName: "g.circle.fill")
                             .font(.system(size: 18, weight: .semibold))
-
-                        Text(google.isSignedIn ? "Continue with Google" : "Sign in with Google")
+                        Text(google.isSignedIn ? "Continue with Google" : "Continue with Google")
                             .font(.headline.weight(.semibold))
-
                         Spacer()
-
                         Image(systemName: "arrow.right")
                             .font(.system(size: 14, weight: .semibold))
-                            .opacity(0.8)
+                            .opacity(0.7)
                     }
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 18)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 52)
-                    .background(
-                        RoundedRectangle(cornerRadius: 16)
-                            .fill(Color.white)
-                    )
+                    .frame(height: 56)
+                    .background(RoundedRectangle(cornerRadius: 22).fill(Color.white))
                 }
                 .foregroundColor(.black)
+                .buttonStyle(AuthGatePressableStyle())
 
-                Text("or")
-                    .foregroundStyle(.white.opacity(0.55))
+                Text("— or —")
+                    .foregroundStyle(.white.opacity(0.5))
                     .font(.footnote.weight(.semibold))
 
-                // ✅ Apple button (keep your existing implementation)
                 SupabaseSignInWithAppleButton()
-                    .frame(height: 52)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .frame(height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 22))
+                    .buttonStyle(AuthGatePressableStyle())
 
                 Button {
                     isGuest = true
                 } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "person.crop.circle.badge.questionmark")
-                            .font(.system(size: 18, weight: .semibold))
+                    HStack(spacing: 12) {
+                        Image(systemName: "person.crop.circle")
+                            .font(.system(size: 16, weight: .semibold))
                         Text("Continue as Guest")
                             .font(.headline.weight(.semibold))
                         Spacer()
                         Image(systemName: "arrow.right")
                             .font(.system(size: 14, weight: .semibold))
-                            .opacity(0.8)
+                            .opacity(0.7)
                     }
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 18)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 52)
+                    .frame(height: 56)
                     .background(
-                        RoundedRectangle(cornerRadius: 16)
-                            .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 22)
+                            .stroke(Color.white.opacity(0.2), lineWidth: 1)
                     )
                 }
                 .foregroundColor(.white)
+                .buttonStyle(AuthGatePressableStyle())
             }
             .padding(.horizontal, 28)
 
             Spacer()
 
-            Text("Google is used for Gmail and Calendar access.")
-                .font(.footnote)
-                .foregroundStyle(.white.opacity(0.65))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
+            VStack(spacing: 6) {
+                Text("Used only to connect your data securely to your personal AI.")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.65))
+                Text("Nothing is shared without your consent.")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 28)
 
             Spacer(minLength: 26)
         }
-        .background(
+        .opacity(appeared ? 1 : 0)
+        .offset(y: appeared ? 0 : 18)
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.28)) {
+                appeared = true
+            }
+        }
+        .background(AuthGateBackground().ignoresSafeArea())
+    }
+}
+
+private struct AuthGatePressableStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.18), value: configuration.isPressed)
+            .onChange(of: configuration.isPressed) { _, pressed in
+                if pressed {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
+            }
+    }
+}
+
+private struct AuthGateBackground: View {
+    var body: some View {
+        ZStack {
             LinearGradient(
-                colors: [Color.black, Color(hue: 0.55, saturation: 0.5, brightness: 0.2)],
+                colors: [Color.black, Color(hue: 0.58, saturation: 0.4, brightness: 0.15)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-            .overlay(
-                RadialGradient(
-                    colors: [Color.white.opacity(0.10), Color.clear],
-                    center: .top,
-                    startRadius: 20,
-                    endRadius: 360
-                )
+            RadialGradient(
+                colors: [HVTheme.accent.opacity(0.15), .clear],
+                center: .top,
+                startRadius: 40,
+                endRadius: 320
             )
-            .ignoresSafeArea()
-        )
+            RadialGradient(
+                colors: [Color.white.opacity(0.08), .clear],
+                center: .bottomTrailing,
+                startRadius: 40,
+                endRadius: 280
+            )
+        }
     }
 }
 
@@ -1704,6 +1834,7 @@ struct AuthGateView: View {
 // MARK: - DELETE ACCOUNT
 // ======================================================
 
+// Confirmation flow that clears local data and disconnects accounts.
 struct DeleteAccountView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: ChatStore
@@ -1711,6 +1842,7 @@ struct DeleteAccountView: View {
 
     @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
     @AppStorage("hushh_guest_mode") private var isGuest: Bool = false
+    @AppStorage("hushh_kai_user_id") private var kaiUserID: String = ""
 
     @State private var confirmText: String = ""
     @State private var isDeleting: Bool = false
@@ -1770,9 +1902,25 @@ struct DeleteAccountView: View {
 
     @MainActor
     private func deleteAccount() async {
+        // Disconnect integrations and clear local state.
         guard deleteEnabled else { return }
         isDeleting = true
         errorText = nil
+
+        do {
+            let token = await google.ensureValidAccessToken()
+            try await HushhAPI.deleteAccount(
+                googleToken: token,
+                appleUserID: appleUserID,
+                kaiUserID: kaiUserID
+            )
+        } catch {
+            errorText = error.localizedDescription
+            isDeleting = false
+            return
+        }
+
+        clearLocalUserState()
 
         if google.hasConnectedGoogle {
             await google.disconnect()
@@ -1781,6 +1929,7 @@ struct DeleteAccountView: View {
             AppleSupabaseAuth.shared.signOut()
             appleUserID = ""
         }
+
         store.clearAllChatsAndReset()
         isGuest = true
         success = true
@@ -1789,12 +1938,34 @@ struct DeleteAccountView: View {
 
         isDeleting = false
     }
+
+    @MainActor
+    private func clearLocalUserState() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: "hv_profile_completed")
+        defaults.removeObject(forKey: "hv_hushhtech_intro_completed")
+        defaults.removeObject(forKey: "hv_has_completed_investor_onboarding")
+        defaults.removeObject(forKey: "hushh_has_seen_intro")
+        defaults.removeObject(forKey: "hushh_kai_last_prompt")
+
+        if !kaiUserID.isEmpty {
+            defaults.removeObject(forKey: "hushh_kai_onboarding_state_v1_\(kaiUserID)")
+            defaults.removeObject(forKey: "hushh_kai_onboarding_sync_pending_\(kaiUserID)")
+        }
+        if !appleUserID.isEmpty {
+            defaults.removeObject(forKey: "hushh_kai_onboarding_state_v1_\(appleUserID)")
+            defaults.removeObject(forKey: "hushh_kai_onboarding_sync_pending_\(appleUserID)")
+        }
+
+        kaiUserID = ""
+    }
 }
 
 // ======================================================
 // MARK: - CHAT VIEW (root)
 // ======================================================
 
+// Main app screen that wires together store, auth, and UI.
 struct ChatView: View {
     @StateObject private var store = ChatStore()
     @ObservedObject var auth = GoogleSignInManager.shared
@@ -1804,6 +1975,7 @@ struct ChatView: View {
     @State private var showInvestorOnboarding: Bool = false
 
     @AppStorage("hushh_apple_user_id") private var appleUserID: String = ""
+    @AppStorage("hushh_kai_user_id") private var kaiUserID: String = ""
     @AppStorage("hushh_is_dark") private var isDarkMode: Bool = true
     @AppStorage("hushh_has_seen_intro") private var hasSeenIntro: Bool = false
     @AppStorage("hushh_guest_mode") private var isGuest: Bool = false
@@ -1861,6 +2033,7 @@ struct ChatView: View {
     }
 
     private var mainChat: some View {
+        // Core chat layout: header, messages, composer, sidebar.
         ZStack(alignment: .leading) {
             VStack(spacing: 0) {
                 HeaderBar {
@@ -1991,17 +2164,21 @@ struct ChatView: View {
         .onChange(of: store.activeChatID) { _ in randomizeEmptyPhrase() }
     }
 
+
     private func isLastAssistant(_ msg: Message) -> Bool {
+        // Used to decide which assistant message gets typing animation.
         guard msg.role == .assistant else { return false }
         guard let last = store.activeMessages.last(where: { $0.role == .assistant }) else { return false }
         return last.id == msg.id
     }
 
     private func randomizeEmptyPhrase() {
+        // Pick a random empty-state prompt.
         currentEmptyPhrase = emptyPhrases.randomElement() ?? emptyPhrases[0]
     }
 
     private func send() async {
+        // Send message, show typing state, and gate Google features if needed.
         let q = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
 
@@ -2026,6 +2203,7 @@ struct ChatView: View {
     }
 
     private func handleSpeakToggle(for msg: Message) {
+        // Toggle TTS playback for the selected assistant message.
         if speech.currentMessageID == msg.id && (speech.isPlaying || speech.isLoading) {
             speech.stop()
         } else {
@@ -2034,6 +2212,7 @@ struct ChatView: View {
     }
 
     private func handleSignOut() {
+        // Sign out of all services and clear local state.
         AppleSupabaseAuth.shared.signOut()
         appleUserID = ""
         auth.signOut()
@@ -2043,6 +2222,7 @@ struct ChatView: View {
     }
 
     private func requiresGoogleIntegration(for text: String) -> Bool {
+        // Simple keyword check to decide if Google token is required.
         let lower = text.lowercased()
         let keywords = ["gmail", "email", "inbox", "calendar", "event", "meeting", "schedule"]
         return keywords.contains { lower.contains($0) }
@@ -2055,6 +2235,7 @@ struct ChatView: View {
 // MARK: - SIRI SHORTCUTS INLINE
 // ======================================================
 
+// Siri Shortcut intent that calls the same backend.
 struct AskHushhVoiceIntent: AppIntent {
     static var title: LocalizedStringResource = "Ask HushhVoice"
     static var description = IntentDescription("Ask HushhVoice anything")
@@ -2073,6 +2254,7 @@ struct AskHushhVoiceIntent: AppIntent {
     }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
+        // Run the ask endpoint and speak a short response.
         let token = await GoogleSignInManager.shared.ensureValidAccessToken()
         print("🔵 AskHushhVoiceIntent.perform: token is \(token == nil ? "nil" : "non-nil")")
 
