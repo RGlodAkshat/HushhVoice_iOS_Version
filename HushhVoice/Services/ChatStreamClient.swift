@@ -38,11 +38,18 @@ final class ChatStreamClient: ObservableObject {
         let task = URLSession.shared.webSocketTask(with: request)
         webSocket = task
         task.resume()
-        DispatchQueue.main.async {
-            self.state = .connected
-            self.onConnectionChange?(self.state)
+        task.sendPing { [weak self] error in
+            DispatchQueue.main.async {
+                if let error {
+                    self?.handleError(error.localizedDescription)
+                    self?.disconnect()
+                } else {
+                    self?.state = .connected
+                    self?.onConnectionChange?(self?.state ?? .connected)
+                }
+            }
         }
-        debugLog("connected \(url.absoluteString)")
+        debugLog("connecting \(url.absoluteString)")
         listen()
     }
 

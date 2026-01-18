@@ -680,6 +680,13 @@ struct ChatView: View {
             }
             assistantStatusText = nil
             assistantTextVisible = false
+        case "state.change":
+            store.applyStreamEvent(event)
+            if let toState = event.payload.string("to"), toState == "speaking" {
+                if audioCapture.isCapturing {
+                    audioCapture.pauseCaptureForPlayback()
+                }
+            }
         case "tool_call.progress":
             store.applyStreamEvent(event)
         case "turn.start":
@@ -698,7 +705,12 @@ struct ChatView: View {
             audioStreamActive = false
             speech.finishStreamingSpeech()
             store.applyStreamEvent(event)
-            if !audioCapture.isMuted && !audioCapture.isCapturing {
+            if !audioCapture.isMuted
+                && !audioCapture.isCapturing
+                && !speech.isPlaying
+                && !speech.isLoading
+                && !streamingSpeechActive
+                && !audioStreamActive {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                     if !audioCapture.isMuted {
                         audioCapture.startCapture()
@@ -715,7 +727,12 @@ struct ChatView: View {
             speech.finishStreamingSpeech()
             store.finalizeAssistantStream(status: .interrupted)
             store.applyStreamEvent(event)
-            if !audioCapture.isMuted && !audioCapture.isCapturing {
+            if !audioCapture.isMuted
+                && !audioCapture.isCapturing
+                && !speech.isPlaying
+                && !speech.isLoading
+                && !streamingSpeechActive
+                && !audioStreamActive {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                     if !audioCapture.isMuted {
                         audioCapture.startCapture()
