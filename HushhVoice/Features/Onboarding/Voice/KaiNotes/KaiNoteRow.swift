@@ -29,10 +29,10 @@ struct KaiNoteRow: View {
                 StreamingMarkdownText(
                     fullText: note.text,
                     animate: true,
-                    charDelay: 0.012
+                    charDelay: 0.012,
+                    baseFont: .footnote,
+                    textColor: HVTheme.botText
                 )
-                .font(.footnote)
-                .foregroundStyle(HVTheme.botText)
                 .fixedSize(horizontal: false, vertical: true)
             } else {
                 Text(note.text)

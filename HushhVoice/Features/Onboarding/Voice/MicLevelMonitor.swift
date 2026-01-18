@@ -20,9 +20,6 @@ final class MicLevelMonitor: ObservableObject {
     }
 
     func start() {
-        if isRunning && engine.isRunning { return }
-        isRunning = true
-
         let session = AVAudioSession.sharedInstance()
         switch session.recordPermission {
         case .undetermined:
@@ -47,6 +44,16 @@ final class MicLevelMonitor: ObservableObject {
             isRunning = false
             return
         }
+
+        if isRunning && engine.isRunning {
+            return
+        }
+
+        if engine.isRunning {
+            engine.stop()
+        }
+        engine.inputNode.removeTap(onBus: 0)
+        isRunning = true
 
         let input = engine.inputNode
         let format = input.inputFormat(forBus: 0)
@@ -99,8 +106,10 @@ final class MicLevelMonitor: ObservableObject {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        if engine.isRunning {
+            engine.stop()
+        }
         engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
         print("MicLevelMonitor: engine stopped")
         DispatchQueue.main.async {
             self.level = Self.idleLevel

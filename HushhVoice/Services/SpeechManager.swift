@@ -12,6 +12,11 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
 
     private var player: AVAudioPlayer?
     private let synth = AVSpeechSynthesizer()
+    private var streamingMode = false
+    private var streamingSegmentCount = 0
+    private var audioEngine: AVAudioEngine?
+    private var audioNode: AVAudioPlayerNode?
+    private var audioStreamFormat: AVAudioFormat?
 
     override init() {
         super.init()
@@ -24,6 +29,30 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         Task { await speakAsync(trimmed, messageID: messageID) }
+    }
+
+    func startStreamingSpeech(messageID: UUID?) {
+        Task { await MainActor.run { self.startStreamingSpeechInternal(messageID: messageID) } }
+    }
+
+    func enqueueStreamingSegment(_ text: String) {
+        Task { await MainActor.run { self.enqueueStreamingSegmentInternal(text) } }
+    }
+
+    func finishStreamingSpeech() {
+        Task { await MainActor.run { self.finishStreamingSpeechInternal() } }
+    }
+
+    func startAudioStream(sampleRate: Double, channels: Int, messageID: UUID?) {
+        Task { await MainActor.run { self.startAudioStreamInternal(sampleRate: sampleRate, channels: channels, messageID: messageID) } }
+    }
+
+    func appendAudioChunk(_ data: Data) {
+        Task { await MainActor.run { self.appendAudioChunkInternal(data) } }
+    }
+
+    func finishAudioStream() {
+        Task { await MainActor.run { self.finishAudioStreamInternal() } }
     }
 
     func stop() { Task { await MainActor.run { self.stopAllInternal() } } }
@@ -58,6 +87,7 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
         await MainActor.run {
             self.isLoading = false
             self.isPlaying = true
+            self.streamingMode = false
             let utterance = AVSpeechUtterance(string: text)
             if let betterVoice = AVSpeechSynthesisVoice(language: "en-US") {
                 utterance.voice = betterVoice
@@ -85,16 +115,29 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
         // Stop any active audio and reset state flags.
         if let player, player.isPlaying { player.stop() }
         if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
+        if let node = audioNode {
+            node.stop()
+        }
+        if let engine = audioEngine {
+            engine.stop()
+        }
 
         player = nil
+        audioNode = nil
+        audioEngine = nil
+        audioStreamFormat = nil
+        streamingMode = false
+        streamingSegmentCount = 0
         isLoading = false
         isPlaying = false
         currentMessageID = nil
 
-        do {
-            try AVAudioSession.sharedInstance().setActive(false, options: [])
-        } catch {
-            print("AudioSession deactivation error: \(error)")
+        if !AudioCaptureManager.shared.isCapturing {
+            do {
+                try AVAudioSession.sharedInstance().setActive(false, options: [])
+            } catch {
+                print("AudioSession deactivation error: \(error)")
+            }
         }
     }
 
@@ -104,7 +147,119 @@ final class SpeechManager: NSObject, ObservableObject, AVAudioPlayerDelegate, AV
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        // Clean up when system voice finishes.
-        Task { await MainActor.run { self.stopAllInternal() } }
+        // Handle streaming vs normal speech completion.
+        Task {
+            await MainActor.run {
+                if self.streamingMode {
+                    self.streamingSegmentCount = max(0, self.streamingSegmentCount - 1)
+                    if self.streamingSegmentCount == 0 && !self.synth.isSpeaking {
+                        self.isPlaying = false
+                        if !self.streamingMode {
+                            self.stopAllInternal()
+                        }
+                    }
+                } else {
+                    self.stopAllInternal()
+                }
+            }
+        }
+    }
+
+    private func startStreamingSpeechInternal(messageID: UUID?) {
+        stopAllInternal()
+        streamingMode = true
+        streamingSegmentCount = 0
+        currentMessageID = messageID
+        isLoading = false
+        isPlaying = false
+        configureAudioSession()
+    }
+
+    private func enqueueStreamingSegmentInternal(_ text: String) {
+        guard streamingMode else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let utterance = AVSpeechUtterance(string: trimmed)
+        if let betterVoice = AVSpeechSynthesisVoice(language: "en-US") {
+            utterance.voice = betterVoice
+        }
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
+        streamingSegmentCount += 1
+        isPlaying = true
+        synth.speak(utterance)
+    }
+
+    private func finishStreamingSpeechInternal() {
+        streamingMode = false
+        if !synth.isSpeaking && streamingSegmentCount == 0 {
+            stopAllInternal()
+        }
+    }
+
+    private func startAudioStreamInternal(sampleRate: Double, channels: Int, messageID: UUID?) {
+        stopAllInternal()
+        currentMessageID = messageID
+        isLoading = false
+        isPlaying = true
+        configureAudioSession()
+
+        let engine = AVAudioEngine()
+        let node = AVAudioPlayerNode()
+        engine.attach(node)
+
+        let channelCount = AVAudioChannelCount(max(1, channels))
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: sampleRate,
+            channels: channelCount,
+            interleaved: false
+        ) else {
+            stopAllInternal()
+            return
+        }
+
+        engine.connect(node, to: engine.mainMixerNode, format: format)
+        do {
+            try engine.start()
+            node.play()
+            audioEngine = engine
+            audioNode = node
+            audioStreamFormat = format
+        } catch {
+            print("AudioStream start error: \(error)")
+            stopAllInternal()
+        }
+    }
+
+    private func appendAudioChunkInternal(_ data: Data) {
+        guard let node = audioNode, let format = audioStreamFormat else { return }
+        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+        guard bytesPerFrame > 0 else { return }
+        let frameCount = data.count / bytesPerFrame
+        guard frameCount > 0 else { return }
+
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else { return }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+
+        data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            let audioBuffer = buffer.int16ChannelData?[0]
+            audioBuffer?.assign(from: baseAddress.assumingMemoryBound(to: Int16.self), count: frameCount)
+        }
+
+        node.scheduleBuffer(buffer, completionHandler: nil)
+    }
+
+    private func finishAudioStreamInternal() {
+        if let node = audioNode {
+            node.stop()
+        }
+        if let engine = audioEngine {
+            engine.stop()
+        }
+        audioNode = nil
+        audioEngine = nil
+        audioStreamFormat = nil
+        isPlaying = false
     }
 }

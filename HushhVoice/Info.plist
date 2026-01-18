@@ -9,5 +9,9 @@
 </string>
 	<key>NSCameraUsageDescription</key>
 	<string>HushhVoice can use the camera for profile verification and in-app capture when enabled.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>HushhVoice uses the microphone to capture your voice prompts.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>HushhVoice uses speech recognition to transcribe your voice prompts.</string>
 </dict>
 </plist>

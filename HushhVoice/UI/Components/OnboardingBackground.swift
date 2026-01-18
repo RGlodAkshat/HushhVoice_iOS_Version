@@ -13,6 +13,7 @@ struct OnboardingBackground: View {
             )
             .ignoresSafeArea()
             RadialGradient(
+
                 colors: [HVTheme.accent.opacity(0.20), Color.clear],
                 center: .top,
                 startRadius: 20,

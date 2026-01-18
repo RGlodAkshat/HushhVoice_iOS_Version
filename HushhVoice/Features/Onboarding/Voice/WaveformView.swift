@@ -4,6 +4,7 @@ struct WaveformView: View {
     var level: CGFloat
     var isMuted: Bool
     var accent: Color
+    var height: CGFloat = 90
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
@@ -39,7 +40,7 @@ struct WaveformView: View {
                     context.stroke(path, with: .color(color), lineWidth: 2.6)
                 }
             }
-            .frame(height: 90)
+            .frame(height: height)
         }
         .allowsHitTesting(false)
         .animation(.linear(duration: 0.08), value: level)

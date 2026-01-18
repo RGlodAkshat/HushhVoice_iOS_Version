@@ -1,6 +1,15 @@
 {
-  "originHash" : "5f3436049b395fcbc71828c07d82e81a46af698ebe0b146cdc52345a5a60558d",
+  "originHash" : "9f7aacc692a1a76a56986656d133bc17f83cf7c7327ac7c1a3787cabe6c5c3ce",
   "pins" : [
+    {
+      "identity" : "orb",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/metasidd/Orb.git",
+      "state" : {
+        "revision" : "8c5dda85e55638893f37657b56558968c3e11409",
+        "version" : "0.2.0"
+      }
+    },
     {
       "identity" : "supabase-swift",
       "kind" : "remoteSourceControl",
@@ -53,6 +62,15 @@
       "state" : {
         "revision" : "45eb0224913ea070ec4fba17291b9e7ecf4749ca",
         "version" : "1.5.1"
+      }
+    },
+    {
+      "identity" : "webrtc-xcframework",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/livekit/webrtc-xcframework",
+      "state" : {
+        "revision" : "5b40f56c637369064b9c82e8f9cfa820f942658f",
+        "version" : "137.7151.10"
       }
     },
     {

@@ -2,11 +2,24 @@ import Foundation
 
 // Lightweight network client for your backend.
 enum HushhAPI {
-    static let base = URL(string: "https://hushhvoice-1.onrender.com")!
-//    static let base = URL(string: "https://03d925e4dffe.ngrok-free.app")!
+    // static let base = URL(string "https://hushhvoice-1.onrender.com")!
+   static let base = URL(string: "https://7def8415dc68.ngrok-free.app")!
 
 
     static let appJWT = "Bearer dev-demo-app-jwt"
+    static let streamSessionToken = "dev-stream-token"
+    static let enableStreaming = true
+
+    static var streamURL: URL? {
+        var comps = URLComponents(url: base, resolvingAgainstBaseURL: false)
+        if comps?.scheme == "https" {
+            comps?.scheme = "wss"
+        } else if comps?.scheme == "http" {
+            comps?.scheme = "ws"
+        }
+        comps?.path = "/chat/stream"
+        return comps?.url
+    }
 
     static func ask(prompt: String, googleToken: String?) async throws -> SiriAskData {
         // Build the request for the ask endpoint.
