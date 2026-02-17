@@ -366,6 +366,53 @@ final class ChatStore: ObservableObject {
         return msg
     }
 
+    func applyFinalUserTranscript(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let chatID = activeChatID,
+              let idx = chats.firstIndex(where: { $0.id == chatID }) else { return }
+
+        if isDraftUserActive {
+            updateVoiceDraft(trimmed)
+            _ = finalizeVoiceDraft(appendToChat: true)
+            return
+        }
+
+        let msg = Message(role: .user, text: trimmed)
+        chats[idx].messages.append(msg)
+        chats[idx].updatedAt = Date()
+        dbg("ChatStore", "user_transcript_append", fields: ["id": msg.id.uuidString, "len": trimmed.count])
+        if chats[idx].title == "New Chat" {
+            chats[idx].title = Self.initialWordsTitle(from: trimmed)
+        }
+        save()
+    }
+
+    func replaceMostRecentUserTranscript(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let chatID = activeChatID,
+              let idx = chats.firstIndex(where: { $0.id == chatID }) else { return }
+
+        guard let lastUserIdx = chats[idx].messages.lastIndex(where: { $0.role == .user }) else {
+            applyFinalUserTranscript(trimmed)
+            return
+        }
+
+        let existing = chats[idx].messages[lastUserIdx]
+        guard existing.text != trimmed else { return }
+        chats[idx].messages[lastUserIdx] = Message(
+            id: existing.id,
+            role: .user,
+            text: trimmed,
+            timestamp: existing.timestamp,
+            status: existing.status
+        )
+        chats[idx].updatedAt = Date()
+        dbg("ChatStore", "user_transcript_replace", fields: ["id": existing.id.uuidString, "len": trimmed.count])
+        save()
+    }
+
     func beginAssistantStream() {
         isAssistantStreaming = true
         streamingAssistantID = UUID()

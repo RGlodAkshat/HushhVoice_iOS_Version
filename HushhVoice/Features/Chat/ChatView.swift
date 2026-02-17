@@ -1,9 +1,162 @@
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import Foundation
 import SafariServices
 
 struct ChatView: View {
+    // Local fallback definition: some support files may not be in the build target membership.
+    // Keeping this nested type unblocks compilation without requiring pbxproj edits.
+    struct IdentifiedURL: Identifiable, Hashable {
+        let id: UUID
+        let url: URL
+
+        init(url: URL) {
+            self.id = UUID()
+            self.url = url
+        }
+    }
+
+    // MARK: - Local UI support types (compile-time)
+    // If `ChatViewSupportViews.swift` is not added to the app target membership, these nested types
+    // ensure ChatView continues to compile.
+
+    struct SafariView: UIViewControllerRepresentable {
+        let url: URL
+
+        func makeUIViewController(context: Context) -> SFSafariViewController {
+            SFSafariViewController(url: url)
+        }
+
+        func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
+    }
+
+    struct ChatScrollOffsetKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
+        }
+    }
+
+    struct ChatContentHeightKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
+        }
+    }
+
+    struct ProgressRowView: View {
+        let text: String
+
+        var body: some View {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(HVTheme.accent)
+                Text(text)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(HVTheme.botText.opacity(0.85))
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(HVTheme.surfaceAlt.opacity(0.95))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
+            )
+            .padding(.horizontal, 20)
+        }
+    }
+
+    struct ChatHintBanner: View {
+        let text: String
+
+        var body: some View {
+            Text(text)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(HVTheme.botText.opacity(0.9))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule()
+                        .fill(HVTheme.surfaceAlt.opacity(0.95))
+                        .overlay(Capsule().stroke(HVTheme.stroke))
+                )
+        }
+    }
+
+    struct GoogleConnectBanner: View {
+        let onConnect: () -> Void
+        let onSignIn: () -> Void
+
+        var body: some View {
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(HVTheme.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Connect Google to enable Gmail + Calendar.")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(HVTheme.botText)
+                    Text("Tools are disabled until you sign in.")
+                        .font(.caption)
+                        .foregroundStyle(HVTheme.botText.opacity(0.7))
+                }
+                Spacer(minLength: 0)
+                Button("Connect") { onConnect() }
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(HVTheme.accent.opacity(0.18)))
+                Button("Sign in") { onSignIn() }
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(HVTheme.surfaceAlt))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(HVTheme.surfaceAlt.opacity(0.95))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(HVTheme.stroke))
+            )
+        }
+    }
+
+    struct VoiceCaptureBar: View {
+        let micLevel: CGFloat
+        let isMuted: Bool
+        let onMicToggle: () -> Void
+
+        var body: some View {
+            HStack(spacing: 12) {
+                WaveformView(level: micLevel, isMuted: isMuted, accent: HVTheme.accent)
+                    .frame(height: 32)
+                    .opacity(isMuted ? 0.45 : 0.85)
+
+                Button(action: onMicToggle) {
+                    Image(systemName: isMuted ? "mic.slash.fill" : "mic.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(isMuted ? HVTheme.surfaceAlt : HVTheme.accent.opacity(0.2)))
+                        .overlay(Circle().stroke(HVTheme.stroke))
+                }
+                .tint(isMuted ? HVTheme.botText : HVTheme.accent)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(HVTheme.surfaceAlt)
+                    .overlay(RoundedRectangle(cornerRadius: 18).stroke(HVTheme.stroke))
+                    .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 3)
+            )
+        }
+    }
+
     @StateObject private var store = ChatStore()
     @ObservedObject var auth = GoogleSignInManager.shared
     @StateObject private var realtime = ChatRealtimeSession()
@@ -50,11 +203,17 @@ struct ChatView: View {
     @State private var allowLocalTranscription = true
     @State private var usedLocalTranscriptInTurn = false
     @State private var receivedRealtimeTranscriptInTurn = false
-    @State private var enableLocalTranscription = true
+    @State private var enableLocalTranscription = false
+    @State private var useLocalSTTOnly = false
     @State private var didCommitUserForCurrentSpeech = false
     @State private var pendingLocalCommitForTurnStart = false
+    @State private var shouldReplaceBufferedUserTranscript = false
+    @State private var pendingSpeechTranscript: String = ""
+    @State private var pendingSpeechCommitWorkItem: DispatchWorkItem?
 
-    private let fallbackUserMessage = "(Voice input - transcription unavailable)"
+    private let speechCommitDelay: TimeInterval = 0.2
+    private let useFallbackMode = false
+    private let realtimeOnlyMode = true
 
     private let emptyPhrases = [
         "Hi, I'm HushhVoice. How may I help you?",
@@ -70,11 +229,18 @@ struct ChatView: View {
     }
 
     private var isMicMuted: Bool {
-        useFallback ? audioCapture.isMuted : realtime.isMuted
+        if useFallback || useLocalSTTOnly {
+            return audioCapture.isMuted
+        }
+        return realtime.isMuted
     }
 
     private var isListeningActive: Bool {
         !isMicMuted && (store.turnState == .listening || store.turnState == .finalizingInput)
+    }
+
+    private var localCaptureCallbacksEnabled: Bool {
+        (useFallbackMode && useFallback) || useLocalSTTOnly || enableLocalTranscription
     }
 
     var body: some View {
@@ -103,13 +269,27 @@ struct ChatView: View {
             dbg("ChatView", "appear", fields: ["user_id": effectiveUserId()])
             configureAudioCaptureCallbacks()
             configureRealtimeCallbacks()
+            useFallback = useFallbackMode
+            if realtimeOnlyMode {
+                useFallback = false
+                useLocalSTTOnly = false
+                enableLocalTranscription = false
+            }
             let effectiveUserID = !kaiUserID.isEmpty ? kaiUserID : (!appleUserID.isEmpty ? appleUserID : UUID().uuidString)
+            realtime.useLocalSTTOnly = useLocalSTTOnly
             realtime.start(userId: effectiveUserID)
             Task {
                 let token = await auth.ensureValidAccessToken()
                 realtime.updateGoogleToken(token)
             }
+            if useLocalSTTOnly {
+                realtime.setMuted(true)
+            }
             audioCapture.setMuted(true)
+        }
+        .onDisappear {
+            pendingSpeechCommitWorkItem?.cancel()
+            pendingSpeechCommitWorkItem = nil
         }
         .onChange(of: isDarkMode) { _, newValue in
             HVTheme.setMode(isDark: newValue)
@@ -124,6 +304,15 @@ struct ChatView: View {
                     withAnimation(.easeInOut(duration: 0.22)) { showSidebar.toggle() }
                 } onGoToHushhTech: {
                     showInvestorOnboarding = true
+                }
+
+                if !isGuest && !auth.hasConnectedGoogle {
+                    GoogleConnectBanner(
+                        onConnect: { showingSettings = true },
+                        onSignIn: { auth.signIn() }
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
                 }
 
                 GeometryReader { scrollGeo in
@@ -374,8 +563,6 @@ struct ChatView: View {
                         onRemoveAttachment: { store.removePendingAttachment($0) }
                     )
                     .frame(maxWidth: .infinity)
-                    .padding(.horizontal)
-                    .padding(.bottom, 10)
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: isListeningActive)
@@ -455,27 +642,33 @@ struct ChatView: View {
         .onChange(of: realtime.state) { _, newValue in
             dbg("ChatView", "realtime_state", fields: ["state": newValue.rawValue])
             if newValue == .error {
-                let msg = "FALLBACK: Realtime unhealthy → STT/LLM/TTS"
+                useFallback = false
+                let msg = "Realtime connection is unhealthy. Reconnecting..."
                 print("🔁 [Chat] \(msg)")
                 store.showHint(msg)
-                useFallback = true
-                let wasMuted = realtime.isMuted
                 realtime.setMuted(true)
                 audioCapture.setAutoRestartAfterFinal(false)
-                audioCapture.setMuted(wasMuted)
+                audioCapture.setMuted(true)
             } else if newValue == .connected {
                 useFallback = false
-                if enableLocalTranscription && !realtime.isMuted {
-                    audioCapture.setAutoRestartAfterFinal(true)
-                    audioCapture.setMuted(false)
-                } else {
-                    audioCapture.setAutoRestartAfterFinal(false)
-                    audioCapture.setMuted(true)
+                if realtimeOnlyMode {
+                    useLocalSTTOnly = false
+                    enableLocalTranscription = false
+                    realtime.useLocalSTTOnly = false
+                }
+                if !useLocalSTTOnly {
+                    if enableLocalTranscription && !realtime.isMuted {
+                        audioCapture.setAutoRestartAfterFinal(true)
+                        audioCapture.setMuted(false)
+                    } else {
+                        audioCapture.setAutoRestartAfterFinal(false)
+                        audioCapture.setMuted(true)
+                    }
                 }
             }
         }
         .onChange(of: realtime.isMuted) { _, muted in
-            guard !useFallback else { return }
+            guard !useFallback, !useLocalSTTOnly else { return }
             if !muted {
                 self.isFollowingLive = true
                 self.isReviewingHistory = false
@@ -488,16 +681,16 @@ struct ChatView: View {
             dbg("ChatView", "realtime_mute", fields: ["muted": muted])
         }
         .onChange(of: audioCapture.isMuted) { _, muted in
-            guard useFallback else { return }
+            guard useFallback || useLocalSTTOnly else { return }
             if !muted {
                 self.isFollowingLive = true
                 self.isReviewingHistory = false
             }
             micMonitor.setMuted(muted)
-            dbg("ChatView", "local_stt_mute", fields: ["muted": muted])
+            dbg("ChatView", useFallback ? "local_stt_mute" : "local_stt_only_mute", fields: ["muted": muted])
         }
         .onChange(of: speech.isPlaying) { _, playing in
-            guard useFallback else { return }
+            guard useFallbackMode && useFallback else { return }
             if !playing && !audioCapture.isMuted {
                 audioCapture.resumeCaptureAfterPlayback()
                 store.setTurnState(.listening)
@@ -558,7 +751,7 @@ struct ChatView: View {
         sending = true
         input = ""
         UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
-        if useFallback {
+        if useFallbackMode && useFallback {
             let reply = await store.send(q, googleToken: token)
             if let reply {
                 let messageID = store.activeMessages.last?.id
@@ -575,7 +768,7 @@ struct ChatView: View {
     }
 
     private func toggleMic() {
-        if useFallback {
+        if useFallbackMode && useFallback {
             if audioCapture.isMuted {
                 print("🎙️ [Chat] mic unmuted (fallback)")
                 dbg("ChatView", "mic_unmuted", fields: ["fallback": true])
@@ -586,6 +779,9 @@ struct ChatView: View {
                 isFollowingLive = true
                 store.setTurnState(.listening)
                 store.beginVoiceDraft()
+                pendingSpeechTranscript = ""
+                pendingSpeechCommitWorkItem?.cancel()
+                pendingSpeechCommitWorkItem = nil
                 audioCapture.setAutoRestartAfterFinal(false)
                 audioCapture.setMuted(false)
             } else {
@@ -596,6 +792,41 @@ struct ChatView: View {
                 audioCapture.setMuted(true)
                 store.cancelVoiceDraft()
                 store.setTurnState(.idle)
+                assistantStatusText = nil
+            }
+            return
+        }
+
+        if useLocalSTTOnly {
+            if audioCapture.isMuted {
+                print("🎙️ [Chat] mic unmuted (local)")
+                dbg("ChatView", "mic_unmuted", fields: ["fallback": false])
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isReviewingHistory = false
+                }
+                isFollowingLive = true
+                store.setTurnState(.listening)
+                store.beginVoiceDraft()
+                pendingSpeechTranscript = ""
+                pendingSpeechCommitWorkItem?.cancel()
+                pendingSpeechCommitWorkItem = nil
+                allowLocalTranscription = true
+                usedLocalTranscriptInTurn = false
+                receivedRealtimeTranscriptInTurn = false
+                audioCapture.setAutoRestartAfterFinal(true)
+                audioCapture.setMuted(false)
+                realtime.setMuted(true)
+            } else {
+                print("🎙️ [Chat] mic muted (local)")
+                dbg("ChatView", "mic_muted", fields: ["fallback": false])
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                audioCapture.setAutoRestartAfterFinal(false)
+                audioCapture.setMuted(true)
+                store.cancelVoiceDraft()
+                store.setTurnState(.idle)
+                realtime.setMuted(true)
+                assistantStatusText = nil
             }
             return
         }
@@ -610,6 +841,9 @@ struct ChatView: View {
             isFollowingLive = true
             store.setTurnState(.listening)
             store.beginVoiceDraft()
+            pendingSpeechTranscript = ""
+            pendingSpeechCommitWorkItem?.cancel()
+            pendingSpeechCommitWorkItem = nil
             allowLocalTranscription = enableLocalTranscription
             usedLocalTranscriptInTurn = false
             receivedRealtimeTranscriptInTurn = false
@@ -632,15 +866,17 @@ struct ChatView: View {
             }
             store.cancelVoiceDraft()
             store.setTurnState(.idle)
+            assistantStatusText = nil
         }
     }
 
     @MainActor
     private func handleFallbackFinalTranscript(_ text: String) async {
-        guard useFallback else { return }
+        guard useFallbackMode && useFallback else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         print("🎙️ [Fallback] final transcript len=\(trimmed.count)")
+        assistantStatusText = "Thinking..."
         _ = store.finalizeVoiceDraft(appendToChat: true)
         store.setTurnState(.thinking)
         let token = await auth.ensureValidAccessToken()
@@ -653,6 +889,7 @@ struct ChatView: View {
             print("🎙️ [Fallback] no reply from backend")
         }
         store.setTurnState(.idle)
+        assistantStatusText = nil
     }
 
     private func configureRealtimeCallbacks() {
@@ -667,87 +904,140 @@ struct ChatView: View {
     private func configureAudioCaptureCallbacks() {
         audioCapture.onSpeechStart = { [store] in
             DispatchQueue.main.async {
+                guard localCaptureCallbacksEnabled, !audioCapture.isMuted else { return }
                 dbg("AudioCapture", "speech_start")
+                pendingSpeechCommitWorkItem?.cancel()
+                pendingSpeechCommitWorkItem = nil
+                if useFallbackMode && useFallback {
+                    speech.stop()
+                } else {
+                    realtime.interruptForBargeIn()
+                }
                 store.setTurnState(.listening)
                 didCommitUserForCurrentSpeech = false
                 pendingLocalCommitForTurnStart = false
+                shouldReplaceBufferedUserTranscript = false
+                assistantStatusText = "Hearing your message..."
             }
         }
-        audioCapture.onPartialTranscript = { [store] text in
+        audioCapture.onPartialTranscript = { text in
             DispatchQueue.main.async {
+                guard localCaptureCallbacksEnabled, !audioCapture.isMuted else { return }
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
                 guard allowLocalTranscription,
-                      !receivedRealtimeTranscriptInTurn,
                       !didCommitUserForCurrentSpeech
                 else { return }
+                if !useLocalSTTOnly && receivedRealtimeTranscriptInTurn {
+                    return
+                }
                 dbg("AudioCapture", "partial", fields: ["len": text.count])
-                store.updateVoiceDraft(text)
+                if useFallbackMode && useFallback {
+                    speech.stop()
+                } else {
+                    realtime.interruptForBargeIn()
+                }
+                assistantStatusText = "Hearing your message..."
             }
         }
-        audioCapture.onFinalTranscript = { [store] text in
+        audioCapture.onFinalTranscript = { text in
             Task {
                 let shouldHandle = await MainActor.run {
-                    allowLocalTranscription && !receivedRealtimeTranscriptInTurn && !didCommitUserForCurrentSpeech
+                    localCaptureCallbacksEnabled
+                        && !audioCapture.isMuted
+                        &&
+                    allowLocalTranscription && (!receivedRealtimeTranscriptInTurn || useLocalSTTOnly) && !didCommitUserForCurrentSpeech
                 }
                 guard shouldHandle else { return }
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
 
                 await MainActor.run {
                     dbg("AudioCapture", "final", fields: ["len": text.count])
-                    store.updateVoiceDraft(text)
-                }
-
-                if useFallback {
-                    if isUsableTranscript(text) {
-                        await handleFallbackFinalTranscript(text)
-                        await MainActor.run {
-                            didCommitUserForCurrentSpeech = true
-                            pendingLocalCommitForTurnStart = (store.currentTurnID == nil)
-                        }
-                    } else {
-                        await MainActor.run {
-                            didCommitUserForCurrentSpeech = true
-                            pendingLocalCommitForTurnStart = (store.currentTurnID == nil)
-                            usedLocalTranscriptInTurn = true
-                            _ = store.commitFallbackUserMessage(fallbackUserMessage)
-                            store.setTurnState(.thinking)
-                            dbg("ChatView", "local_fallback_commit")
-                        }
-                    }
-                } else {
-                    await MainActor.run {
-                        if isUsableTranscript(text) {
-                            usedLocalTranscriptInTurn = true
-                            didCommitUserForCurrentSpeech = true
-                            pendingLocalCommitForTurnStart = (store.currentTurnID == nil)
-                            _ = store.finalizeVoiceDraft(appendToChat: true)
-                            store.setTurnState(.thinking)
-                            dbg("ChatView", "local_commit", fields: ["len": text.count])
-                        } else {
-                            usedLocalTranscriptInTurn = true
-                            didCommitUserForCurrentSpeech = true
-                            pendingLocalCommitForTurnStart = (store.currentTurnID == nil)
-                            _ = store.commitFallbackUserMessage(fallbackUserMessage)
-                            store.setTurnState(.thinking)
-                            dbg("ChatView", "local_fallback_commit")
-                        }
-                    }
+                    pendingSpeechTranscript = mergeSpeechTranscriptSegments(existing: pendingSpeechTranscript, incoming: trimmed)
+                    store.setTurnState(.finalizingInput)
+                    assistantStatusText = "Hearing your message..."
+                    schedulePendingSpeechCommit()
                 }
             }
         }
         audioCapture.onSpeechEnd = { [store] in
             DispatchQueue.main.async {
+                guard localCaptureCallbacksEnabled, !audioCapture.isMuted else { return }
                 dbg("AudioCapture", "speech_end")
-                if allowLocalTranscription && !receivedRealtimeTranscriptInTurn && !didCommitUserForCurrentSpeech {
-                    didCommitUserForCurrentSpeech = true
-                    pendingLocalCommitForTurnStart = (store.currentTurnID == nil)
-                    usedLocalTranscriptInTurn = true
-                    _ = store.commitFallbackUserMessage(fallbackUserMessage)
-                    store.setTurnState(.thinking)
-                    dbg("ChatView", "speech_end_fallback_commit")
-                } else {
-                    store.setTurnState(.thinking)
+                guard allowLocalTranscription, !didCommitUserForCurrentSpeech else {
+                    return
                 }
+                store.setTurnState(.finalizingInput)
+                assistantStatusText = "Hearing your message..."
+                schedulePendingSpeechCommit()
             }
         }
+    }
+
+    private func schedulePendingSpeechCommit() {
+        pendingSpeechCommitWorkItem?.cancel()
+        let work = DispatchWorkItem {
+            Task { await commitPendingSpeechTranscript() }
+        }
+        pendingSpeechCommitWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + speechCommitDelay, execute: work)
+    }
+
+    @MainActor
+    private func commitPendingSpeechTranscript() async {
+        pendingSpeechCommitWorkItem = nil
+        guard allowLocalTranscription, !didCommitUserForCurrentSpeech else { return }
+
+        let transcript = pendingSpeechTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        pendingSpeechTranscript = ""
+
+        guard isUsableTranscript(transcript) else {
+            store.cancelVoiceDraft()
+            store.setTurnState(isMicMuted ? .idle : .listening)
+            assistantStatusText = nil
+            dbg("ChatView", "speech_commit_skipped_empty")
+            return
+        }
+
+        usedLocalTranscriptInTurn = true
+        didCommitUserForCurrentSpeech = true
+        pendingLocalCommitForTurnStart = (store.currentTurnID == nil)
+        shouldReplaceBufferedUserTranscript = false
+        assistantStatusText = "Thinking..."
+
+        if useFallbackMode && useFallback {
+            store.beginVoiceDraft()
+            store.updateVoiceDraft(transcript)
+            await handleFallbackFinalTranscript(transcript)
+            return
+        }
+
+        store.beginVoiceDraft()
+        store.updateVoiceDraft(transcript)
+        store.setTurnState(.thinking)
+        dbg("ChatView", "local_commit", fields: ["len": transcript.count])
+        let token = await auth.ensureValidAccessToken()
+        realtime.updateGoogleToken(token)
+        realtime.sendUserText(transcript)
+        _ = store.finalizeVoiceDraft(appendToChat: true)
+    }
+
+    private func mergeSpeechTranscriptSegments(existing: String, incoming: String) -> String {
+        let current = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+        let next = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !next.isEmpty else { return current }
+        guard !current.isEmpty else { return next }
+
+        let currentLower = current.lowercased()
+        let nextLower = next.lowercased()
+        if currentLower == nextLower || currentLower.contains(nextLower) {
+            return current
+        }
+        if nextLower.contains(currentLower) {
+            return next
+        }
+        return current + " " + next
     }
 
     private func handleStreamEvent(_ event: StreamEventEnvelope) {
@@ -763,6 +1053,18 @@ struct ChatView: View {
             "tool_call.progress",
             "confirmation.request",
         ]
+        // Some upstream events (notably input transcription) may arrive without `turn_id`.
+        // We still want to apply them to the current UI turn when possible.
+        let allowedWithoutTurn: Set<String> = [
+            "input_transcript.delta",
+            "input_transcript.final",
+            "hint",
+            "assistant_text.delta",
+            "assistant_text.final",
+            "assistant_audio.start",
+            "assistant_audio.end",
+            "state.change",
+        ]
         if event.turn_id == nil && requiresTurn.contains(event.event_type) {
             print("🛰️ [Chat] ignoring \(event.event_type) without turn_id")
             return
@@ -774,12 +1076,16 @@ struct ChatView: View {
             return
         }
         if event.event_type != "turn.start" {
-            guard let incomingTurn = event.turn_id else { return }
-            if let currentTurn = store.currentTurnID {
-                guard incomingTurn == currentTurn else { return }
-            } else if event.event_type != "input_transcript.delta"
-                        && event.event_type != "input_transcript.final" {
-                return
+            if let incomingTurn = event.turn_id {
+                if let currentTurn = store.currentTurnID {
+                    guard incomingTurn == currentTurn else { return }
+                }
+            } else {
+                // No turn_id: allow only known-safe session-level UI events (especially user transcript).
+                guard allowedWithoutTurn.contains(event.event_type) else {
+                    dbg("ChatView", "event_dropped_no_turn", fields: ["type": event.event_type])
+                    return
+                }
             }
         }
         dbg("ChatView", "event_dispatch", fields: [
@@ -794,19 +1100,32 @@ struct ChatView: View {
         case "assistant_audio.end":
             break
         case "input_transcript.delta", "input_transcript.final":
+            if useLocalSTTOnly {
+                return
+            }
             let text = event.payload.string("text") ?? ""
             if !text.isEmpty {
                 receivedRealtimeTranscriptInTurn = true
+                pendingSpeechTranscript = mergeSpeechTranscriptSegments(existing: pendingSpeechTranscript, incoming: text)
+                assistantStatusText = "Hearing your message..."
             }
-            if usedLocalTranscriptInTurn || didCommitUserForCurrentSpeech {
+            if usedLocalTranscriptInTurn {
                 dbg("ChatView", "realtime_transcript_ignored", fields: ["reason": "local_used"])
                 return
             }
-            if !text.isEmpty && !didCommitUserForCurrentSpeech {
-                store.applyStreamEvent(event)
-                if event.event_type == "input_transcript.final" {
-                    didCommitUserForCurrentSpeech = true
+            if event.event_type == "input_transcript.delta" {
+                return
+            }
+            if !text.isEmpty {
+                if shouldReplaceBufferedUserTranscript {
+                    store.replaceMostRecentUserTranscript(text)
+                    shouldReplaceBufferedUserTranscript = false
+                } else {
+                    store.applyStreamEvent(event)
                 }
+                didCommitUserForCurrentSpeech = true
+                pendingSpeechTranscript = ""
+                assistantStatusText = assistantTextVisible ? nil : "Thinking..."
             }
         case "assistant_text.delta":
             commitDraftIfNeededBeforeAssistant()
@@ -820,10 +1139,18 @@ struct ChatView: View {
             assistantTextVisible = false
         case "state.change":
             store.applyStreamEvent(event)
+            let toState = event.payload.string("to") ?? ""
+            if toState == "listening" {
+                assistantStatusText = "Hearing your message..."
+            } else if toState == "thinking" || toState == "executing_tools" || toState == "awaiting_confirmation" {
+                assistantStatusText = "Thinking..."
+            } else if toState == "speaking" || toState == "idle" || toState == "cancelled" {
+                assistantStatusText = nil
+            }
         case "tool_call.progress":
             store.applyStreamEvent(event)
         case "turn.start":
-            assistantStatusText = "Preparing response…"
+            assistantStatusText = "Thinking..."
             assistantTextVisible = false
             cancelledTurnID = nil
             allowLocalTranscription = true
@@ -840,11 +1167,15 @@ struct ChatView: View {
         case "turn.end":
             assistantStatusText = nil
             assistantTextVisible = false
+            pendingSpeechTranscript = ""
+            shouldReplaceBufferedUserTranscript = false
             store.applyStreamEvent(event)
         case "turn.cancelled":
             assistantStatusText = nil
             assistantTextVisible = false
             cancelledTurnID = event.turn_id
+            pendingSpeechTranscript = ""
+            shouldReplaceBufferedUserTranscript = false
             store.finalizeAssistantStream(status: .interrupted)
             store.applyStreamEvent(event)
         default:
@@ -860,15 +1191,31 @@ struct ChatView: View {
             if !trimmed.isEmpty {
                 _ = store.finalizeVoiceDraft(appendToChat: true)
                 didCommitUserForCurrentSpeech = true
+                shouldReplaceBufferedUserTranscript = false
                 dbg("ChatView", "force_user_commit", fields: ["len": trimmed.count])
                 return
             }
         }
 
-        _ = store.commitFallbackUserMessage(fallbackUserMessage)
-        didCommitUserForCurrentSpeech = true
-        usedLocalTranscriptInTurn = true
-        dbg("ChatView", "force_user_fallback")
+        let buffered = pendingSpeechTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !buffered.isEmpty {
+            store.beginVoiceDraft()
+            store.updateVoiceDraft(buffered)
+            _ = store.finalizeVoiceDraft(appendToChat: true)
+            didCommitUserForCurrentSpeech = true
+            shouldReplaceBufferedUserTranscript = true
+            pendingSpeechTranscript = ""
+            dbg("ChatView", "force_user_commit_from_buffer", fields: ["len": buffered.count])
+        } else {
+            // If realtime input transcription is missing/late, we still want a visible user bubble.
+            // We'll replace this placeholder when `input_transcript.final` arrives.
+            store.beginVoiceDraft()
+            store.updateVoiceDraft("Voice message")
+            _ = store.finalizeVoiceDraft(appendToChat: true)
+            didCommitUserForCurrentSpeech = true
+            shouldReplaceBufferedUserTranscript = true
+            dbg("ChatView", "force_user_commit_placeholder")
+        }
     }
 
     private func isUsableTranscript(_ text: String) -> Bool {
@@ -936,7 +1283,7 @@ struct ChatView: View {
             isReviewingHistory = true
         } else {
             isFollowingLive = true
-            if !realtime.isMuted {
+            if !isMicMuted {
                 isReviewingHistory = false
             }
         }
@@ -968,109 +1315,6 @@ struct ChatView: View {
         let lower = text.lowercased()
         let keywords = ["gmail", "email", "inbox", "calendar", "event", "meeting", "schedule"]
         return keywords.contains { lower.contains($0) }
-    }
-}
-
-private struct VoiceCaptureBar: View {
-    let micLevel: CGFloat
-    let isMuted: Bool
-    let onMicToggle: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            WaveformView(level: micLevel, isMuted: isMuted, accent: HVTheme.accent, height: 32)
-                .frame(height: 32)
-                .opacity(isMuted ? 0.45 : 0.85)
-
-            Button(action: onMicToggle) {
-                Image(systemName: isMuted ? "mic.slash.fill" : "mic.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .frame(width: 36, height: 36)
-                    .background(Circle().fill(isMuted ? HVTheme.surfaceAlt : HVTheme.accent.opacity(0.2)))
-                    .overlay(Circle().stroke(HVTheme.stroke))
-            }
-            .tint(isMuted ? HVTheme.botText : HVTheme.accent)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 18)
-                .fill(HVTheme.surfaceAlt)
-                .overlay(RoundedRectangle(cornerRadius: 18).stroke(HVTheme.stroke))
-                .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 3)
-        )
-    }
-}
-
-private struct IdentifiedURL: Identifiable {
-    let id = UUID()
-    let url: URL
-}
-
-private struct SafariView: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        SFSafariViewController(url: url)
-    }
-
-    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
-}
-
-private struct ProgressRowView: View {
-    let text: String
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(HVTheme.accent)
-            Text(text)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(HVTheme.botText.opacity(0.85))
-                .lineLimit(2)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(HVTheme.surfaceAlt.opacity(0.95))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(HVTheme.stroke))
-        )
-        .padding(.horizontal, 20)
-    }
-}
-
-private struct ChatHintBanner: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(HVTheme.botText.opacity(0.9))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(
-                Capsule()
-                    .fill(HVTheme.surfaceAlt.opacity(0.95))
-                    .overlay(Capsule().stroke(HVTheme.stroke))
-            )
-    }
-}
-
-private struct ChatScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-private struct ChatContentHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
 

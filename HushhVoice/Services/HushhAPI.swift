@@ -2,8 +2,8 @@ import Foundation
 
 // Lightweight network client for your backend.
 enum HushhAPI {
-    static let base = URL(string: "https://hushhvoice-1.onrender.com")!
-//    static let base = URL(string: "https://9e907f9b347f.ngrok-free.app")!
+//    static let base = URL(string: "https://hushhvoice-1.onrender.com")!
+    static let base = URL(string: "https://66d9-183-87-208-2.ngrok-free.app")!
 
 
     static let appJWT = "Bearer dev-demo-app-jwt"

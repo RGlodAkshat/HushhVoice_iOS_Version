@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // Input bar with attachments, expanding text input, and mic toggle.
 struct ComposerView: View {
@@ -12,14 +13,23 @@ struct ComposerView: View {
     var onMicToggle: () -> Void
     var onRemoveAttachment: ((ChatAttachment) -> Void)?
 
-    private let minHeight: CGFloat = 34
-    private let maxHeight: CGFloat = 96
+    // Keeps the composer compact by default while still being tappable and comfortable.
+    private let inputMinHeight: CGFloat = 44
+    private let inputMaxHeight: CGFloat = 100
+    private let buttonSize: CGFloat = 36
     private let iconSize: CGFloat = 18
 
-    @State private var inputHeight: CGFloat = 34
+    @State private var inputHeight: CGFloat = 44
 
     var body: some View {
-        VStack(spacing: 6) {
+        // Premium minimal dark: slightly gray-black (RGB 28,28,30).
+        let composerBG = Color(red: 28.0 / 255.0, green: 28.0 / 255.0, blue: 30.0 / 255.0)
+        let border = Color.white.opacity(0.08)
+        let cornerRadius: CGFloat = 16
+        let extraBottom = min(10.0, safeAreaBottomInset())
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        VStack(spacing: 8) {
             if !attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -36,63 +46,78 @@ struct ComposerView: View {
                 Button(action: onAttach) {
                     Image(systemName: "plus")
                         .font(.system(size: iconSize, weight: .semibold))
-                        .frame(width: minHeight, height: minHeight)
-                        .background(Circle().fill(HVTheme.surfaceAlt))
-                        .overlay(Circle().stroke(HVTheme.stroke))
+                        .frame(width: buttonSize, height: buttonSize)
+                        .background(Circle().fill(composerBG))
+                        .overlay(Circle().stroke(border, lineWidth: 1))
                 }
                 .tint(HVTheme.accent)
 
-                HStack(alignment: .bottom, spacing: 6) {
+                HStack(alignment: .bottom, spacing: 8) {
                     GrowingTextEditor(
                         text: $text,
                         currentHeight: $inputHeight,
                         placeholder: "Ask HushhVoice…",
-                        minHeight: minHeight,
-                        maxHeight: maxHeight
+                        minHeight: inputMinHeight,
+                        maxHeight: inputMaxHeight,
+                        textColor: .white,
+                        placeholderColor: Color.white.opacity(0.4),
+                        contentInsets: EdgeInsets(top: 11, leading: 15, bottom: 11, trailing: 15)
                     )
                     .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
 
-                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Button(action: onSend) {
-                            if isSending {
-                                ProgressView().tint(.black)
-                            } else {
-                                Image(systemName: "arrow.up.circle.fill")
-                                    .font(.system(size: 20, weight: .semibold))
-                            }
+                    // Keep the trailing affordance space stable (no layout jump) by always reserving it.
+                    Button(action: onSend) {
+                        if isSending {
+                            ProgressView().tint(.black)
+                        } else {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 20, weight: .semibold))
                         }
-                        .frame(width: 28, height: 28)
-                        .background(Circle().fill(Color.white))
-                        .foregroundStyle(Color.black)
-                        .disabled(isSendDisabled)
                     }
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.white))
+                    .foregroundStyle(Color.black)
+                    .disabled(isSendDisabled || !hasText)
+                    .opacity(hasText ? 1 : 0)
+                    .allowsHitTesting(hasText && !isSendDisabled)
+                    .accessibilityHidden(!hasText)
                 }
-                .frame(minHeight: inputHeight + 8)
+                // Keep layout stable during expansion: the pill grows only with the text editor height.
+                .frame(minHeight: max(inputMinHeight, inputHeight))
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+                .padding(.trailing, 8)
                 .background(
-                    RoundedRectangle(cornerRadius: 18)
-                        .fill(HVTheme.surfaceAlt)
-                        .overlay(RoundedRectangle(cornerRadius: 18).stroke(HVTheme.stroke))
-                        .shadow(color: .black.opacity(0.18), radius: 8, x: 0, y: 3)
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .fill(composerBG)
+                        .overlay(RoundedRectangle(cornerRadius: cornerRadius).stroke(border, lineWidth: 1))
                 )
 
                 Button(action: onMicToggle) {
                     Image(systemName: isMicMuted ? "mic.slash.fill" : "mic.fill")
                         .font(.system(size: iconSize, weight: .semibold))
-                        .frame(width: minHeight, height: minHeight)
-                        .background(Circle().fill(isMicMuted ? HVTheme.surfaceAlt : HVTheme.accent.opacity(0.2)))
-                        .overlay(Circle().stroke(HVTheme.stroke))
+                        .frame(width: buttonSize, height: buttonSize)
+                        .background(Circle().fill(composerBG))
+                        .overlay(Circle().stroke(border, lineWidth: 1))
                 }
-                .tint(isMicMuted ? HVTheme.botText : HVTheme.accent)
+                .tint(isMicMuted ? Color.white.opacity(0.6) : HVTheme.accent)
             }
             .padding(.vertical, 2)
         }
         .frame(maxWidth: .infinity)
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 10 + extraBottom)
         .tint(HVTheme.accent)
+    }
+
+    private func safeAreaBottomInset() -> CGFloat {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        for scene in scenes {
+            if let inset = scene.windows.first(where: { $0.isKeyWindow })?.safeAreaInsets.bottom {
+                return inset
+            }
+        }
+        return 0
     }
 }
 

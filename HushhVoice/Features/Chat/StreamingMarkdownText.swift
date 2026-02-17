@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 // Displays text with a simple streaming/typing effect and basic **bold** parsing.
 struct StreamingMarkdownText: View {
@@ -55,5 +56,53 @@ struct StreamingMarkdownText: View {
             result = result + (isBold ? segment.bold() : segment)
         }
         return result
+    }
+}
+
+enum MarkdownLinkDetector {
+    static func longURLs(in text: String, minLength: Int = 60) -> [URL] {
+        guard !text.isEmpty,
+              let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+            return []
+        }
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        var seen = Set<URL>()
+        var results: [URL] = []
+        detector.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
+            guard let url = match?.url else { return }
+            let urlString = url.absoluteString
+            guard urlString.count >= minLength else { return }
+            if seen.insert(url).inserted {
+                results.append(url)
+            }
+        }
+        return results
+    }
+}
+
+struct MarkdownTextBlock: View {
+    let text: String
+    let isStreaming: Bool
+    let baseFont: Font
+    let textColor: Color
+
+    var body: some View {
+        Group {
+            if isStreaming {
+                Text(text)
+                    .transition(.opacity)
+                    .animation(.linear(duration: 0.08), value: text)
+            } else {
+                if let attributed = try? AttributedString(markdown: text) {
+                    Text(attributed)
+                } else {
+                    Text(text)
+                }
+            }
+        }
+        .font(baseFont)
+        .foregroundStyle(textColor)
+        .textSelection(.enabled)
     }
 }

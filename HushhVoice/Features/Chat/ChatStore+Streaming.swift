@@ -17,14 +17,17 @@ extension ChatStore {
         )
 
         switch event.event_type {
+        case "hint":
+            if let message = payload.string("message"), !message.isEmpty {
+                showHint(message)
+            }
         case "input_transcript.delta":
             if let text = payload.string("text"), !text.isEmpty {
                 updateVoiceDraft(text)
             }
         case "input_transcript.final":
             if let text = payload.string("text"), !text.isEmpty {
-                updateVoiceDraft(text)
-                _ = finalizeVoiceDraft(appendToChat: true)
+                applyFinalUserTranscript(text)
             }
         case "assistant_text.delta":
             if let text = payload.string("text") {

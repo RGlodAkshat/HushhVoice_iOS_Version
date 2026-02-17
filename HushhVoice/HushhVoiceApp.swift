@@ -1,21 +1,41 @@
-// HushhVoiceApp.swift
-// Entry point for the app. SwiftUI apps start here.
-
 import SwiftUI
 
-// @main tells Swift this is the app's starting type.
 @main
 struct HushhVoiceApp: App {
-    // body describes the app's scenes (windows) and their root views.
+    private let useNewRealtimeChatUI = true
+
     var body: some Scene {
         WindowGroup {
-            // ChatView is the first screen shown in the main window.
-            ChatView()
-                .onAppear {
-                    // Try to restore a previous login session when the app launches.
-                    AppleSupabaseAuth.shared.restoreSessionIfPossible()
+            Group {
+                // NOTE: `RealtimeChatView` lives in `HushhVoice/Realtime/...` but those files are not
+                // currently referenced by the Xcode project, so the symbol may not exist at compile time.
+                // To enable the new Realtime UI, first add the Realtime folder/files to the app target,
+                // then define the Swift compilation condition `HUSHHVOICE_NEW_REALTIME_UI`.
+                #if HUSHHVOICE_NEW_REALTIME_UI
+                if useNewRealtimeChatUI {
+                    RealtimeChatView()
+                } else {
+                    ChatView()
                 }
-                // Force a dark color scheme for the whole app.
+                #else
+                ChatView()
+                #endif
+            }
+            .onAppear {
+                AppleSupabaseAuth.shared.restoreSessionIfPossible()
+                // Make realtime logs available without needing Scheme env var edits.
+                // If you still want Scheme control, set `HV_REALTIME_DEBUG=0/1` explicitly.
+                #if DEBUG
+                if UserDefaults.standard.object(forKey: "hv_realtime_debug") == nil {
+                    UserDefaults.standard.set(true, forKey: "hv_realtime_debug")
+                }
+                #endif
+                #if HUSHHVOICE_NEW_REALTIME_UI
+                print("[HushhVoiceApp] UI=\(useNewRealtimeChatUI ? "RealtimeChatView" : "ChatView") useNewRealtimeChatUI=\(useNewRealtimeChatUI)")
+                #else
+                print("[HushhVoiceApp] UI=ChatView (HUSHHVOICE_NEW_REALTIME_UI not defined)")
+                #endif
+            }
                 .preferredColorScheme(.dark)
         }
     }

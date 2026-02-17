@@ -38,6 +38,7 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
     private var didFinalizeInput = false
     private var responseInProgress = false
     private var outputAudioActive = false
+    private var pendingResponseCreateReason: String?
 
     private var sessionUpdateCount = 0
     private var lastSessionUpdateCaller: String?
@@ -47,6 +48,16 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
     private var seenAudioDeltaThisResponse = false
     private var lastAssistantDelta: String?
     private var lastAssistantDeltaAt: Date?
+    private var awaitingServerBargeInConfirmation = false
+    private var serverBargeInSpeechStartedAt: Date?
+    private var serverBargeInTranscriptBuffer = ""
+    private let serverBargeInMinSpeechDuration: TimeInterval = 0.8
+    private let serverBargeInMinTranscriptChars: Int = 6
+    private let minValidSpeechDuration: TimeInterval = 0.8
+
+    private var userSpeechStartedAt: Date?
+    private var lastSpeechDuration: TimeInterval = 0
+    private var lastSpeechWasValid: Bool = false
 
     private var pendingToolArgs: [String: String] = [:]
     private var pendingToolNames: [String: String] = [:]
@@ -59,6 +70,7 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
     private var googleToken: String?
 
     private let debugEnabled = true
+    var useLocalSTTOnly: Bool = true
 
     func start(userId: String) {
         self.userId = userId
@@ -91,14 +103,32 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
         factory = nil
         state = .idle
         sessionUpdateSent = false
+        pendingResponseCreateReason = nil
+        clearServerBargeInConfirmation()
         deactivateAudioSession()
         dbg("ChatRealtime", "stop")
     }
 
     func setMuted(_ muted: Bool) {
+        let wasMuted = isMuted
         isMuted = muted
-        localAudioTrack?.isEnabled = !muted
-        dbg("ChatRealtime", "mute", fields: ["muted": muted])
+        localAudioTrack?.isEnabled = !muted && !useLocalSTTOnly
+        // If the user stops talking by muting, only commit if we have a valid speech window.
+        if !useLocalSTTOnly, !wasMuted, muted {
+            let duration = currentSpeechDuration()
+            if duration >= minValidSpeechDuration {
+                sendInputAudioBufferCommit(reason: "mic_muted")
+            } else if duration > 0 {
+                emitHintPleaseSpeakMore()
+                endTurnIfNeeded()
+                resetSpeechWindow()
+            }
+        }
+        dbg("ChatRealtime", "mute", fields: [
+            "muted": muted,
+            "use_local_stt_only": useLocalSTTOnly,
+            "track_enabled": localAudioTrack?.isEnabled ?? false,
+        ])
     }
 
     func updateGoogleToken(_ token: String?) {
@@ -125,6 +155,40 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
         sendResponseCreate(reason: "typed")
     }
 
+    func interruptForBargeIn() {
+        let hadOutputAudio = outputAudioActive
+        let hadResponse = responseInProgress
+        let hadTurn = currentTurnID != nil
+        guard hadOutputAudio || hadResponse || hadTurn else { return }
+
+        dbg("ChatRealtime", "barge_in_interrupt", fields: [
+            "had_audio": hadOutputAudio,
+            "had_response": hadResponse,
+            "had_turn": hadTurn,
+        ])
+
+        sendEvent(["type": "response.cancel"])
+        sendEvent(["type": "output_audio_buffer.clear"])
+        outputAudioActive = false
+        responseInProgress = false
+        assistantTextGateOpen = false
+        assistantTextBuffer = ""
+        pendingAssistantText = ""
+        pendingResponseCreateReason = nil
+        seenTextDeltaThisResponse = false
+        seenAudioDeltaThisResponse = false
+        clearServerBargeInConfirmation()
+
+        if hadOutputAudio {
+            emit(eventType: "assistant_audio.end", payload: [:], role: "assistant")
+        }
+        if let turn = currentTurnID {
+            emit(eventType: "turn.cancelled", payload: ["cancel_turn_id": .string(turn)], role: "system")
+            currentTurnID = nil
+        }
+        emit(eventType: "state.change", payload: ["from": .string("speaking"), "to": .string("listening"), "reason": .string("barge_in")], role: "system")
+    }
+
     func confirmToolCall(confirmationID: UUID, decision: String, editedText: String?) {
         guard let pending = pendingConfirmations[confirmationID.uuidString] else { return }
         dbg("ChatRealtime", "confirm_tool", fields: ["decision": decision, "tool": pending.toolName])
@@ -135,6 +199,7 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
                 callId: pending.callId,
                 output: "{\"error\":\"User declined\"}"
             )
+            requestResponseCreate(reason: "tool_rejected")
         }
         pendingConfirmations.removeValue(forKey: confirmationID.uuidString)
     }
@@ -184,7 +249,6 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
         try session.setCategory(.playAndRecord, mode: .voiceChat, options: [
             .defaultToSpeaker,
             .allowBluetooth,
-            .allowBluetoothA2DP,
         ])
         try session.setActive(true, options: .notifyOthersOnDeactivation)
     }
@@ -250,7 +314,7 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
 
         let audioSource = factory!.audioSource(with: LKRTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil))
         let track = factory!.audioTrack(with: audioSource, trackId: "audio0")
-        track.isEnabled = !isMuted
+        track.isEnabled = !isMuted && !useLocalSTTOnly
         localAudioTrack = track
         _ = peer.add(track, streamIds: ["stream0"])
         dbg("ChatRealtime", "webrtc_audio_track", fields: ["enabled": !isMuted])
@@ -328,33 +392,61 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
             "tools": cfg.tools.map { decodeAnyDict($0) },
             "tool_choice": "auto",
         ]
-        if let turn = cfg.realtime?.turn_detection {
-            let rawTurn = decodeAnyDict(turn)
-            let sanitizedTurn = sanitizeTurnDetection(rawTurn)
-            session["turn_detection"] = sanitizedTurn
-            if let rawThreshold = normalizeNumber(rawTurn["threshold"] ?? 0) {
-                let full = String(format: "%.17g", rawThreshold)
-                let decimals = decimalPlaces(full)
-                dbg("ChatRealtime", "threshold_raw", fields: [
-                    "value": full,
-                    "decimals": decimals,
-                    "caller": caller,
-                ])
+        if !useLocalSTTOnly {
+            if let turn = cfg.realtime?.turn_detection {
+                var rawTurn = decodeAnyDict(turn)
+                // Production hardening: ensure server-side VAD is always used for WebRTC realtime.
+                // If backend sends an unsupported/incorrect type, input speech events + transcription may never arrive.
+                rawTurn["type"] = "server_vad"
+                // Sane defaults if backend omitted them.
+                if rawTurn["threshold"] == nil { rawTurn["threshold"] = 0.6 }
+                if rawTurn["silence_duration_ms"] == nil { rawTurn["silence_duration_ms"] = 900 }
+                if rawTurn["prefix_padding_ms"] == nil { rawTurn["prefix_padding_ms"] = 300 }
+                // IMPORTANT: gate assistant replies until we accept a valid user turn + transcription.
+                // We'll send `response.create` ourselves once transcription final arrives.
+                rawTurn["create_response"] = false
+                let sanitizedTurn = sanitizeTurnDetection(rawTurn)
+                session["turn_detection"] = sanitizedTurn
+                if let rawThreshold = normalizeNumber(rawTurn["threshold"] ?? 0) {
+                    let full = String(format: "%.17g", rawThreshold)
+                    let decimals = decimalPlaces(full)
+                    dbg("ChatRealtime", "threshold_raw", fields: [
+                        "value": full,
+                        "decimals": decimals,
+                        "caller": caller,
+                    ])
+                }
+                if let sanitizedThreshold = sanitizedTurn["threshold"] as? NSDecimalNumber {
+                    let full = sanitizedThreshold.stringValue
+                    let decimals = decimalPlaces(full)
+                    dbg("ChatRealtime", "threshold_sanitized", fields: [
+                        "value": full,
+                        "decimals": decimals,
+                        "caller": caller,
+                    ])
+                }
+                serverVadEnabled = true
+            } else {
+                // Harden voice: if backend config omitted turn_detection, default to server VAD so
+                // we still receive `input_audio_buffer.speech_started/stopped` and input transcription.
+                session["turn_detection"] = [
+                    "type": "server_vad",
+                    "threshold": 0.6,
+                    "silence_duration_ms": 900,
+                    "prefix_padding_ms": 300,
+                    "create_response": false,
+                ]
+                serverVadEnabled = true
+                dbg("ChatRealtime", "turn_detection_defaulted", fields: ["caller": caller])
             }
-            if let sanitizedThreshold = sanitizedTurn["threshold"] as? NSDecimalNumber {
-                let full = sanitizedThreshold.stringValue
-                let decimals = decimalPlaces(full)
-                dbg("ChatRealtime", "threshold_sanitized", fields: [
-                    "value": full,
-                    "decimals": decimals,
-                    "caller": caller,
-                ])
-            }
-            serverVadEnabled = true
         } else {
             serverVadEnabled = false
         }
-        session["input_audio_transcription"] = ["model": "gpt-4o-mini-transcribe"]
+        if !useLocalSTTOnly {
+            // Match the known-good session.update used by `KaiVoiceViewModel` (same model + WebRTC stack).
+            // This controls whether user input transcription events are emitted.
+            session["input_audio_transcription"] = ["model": "gpt-4o-mini-transcribe"]
+        }
 
         let sanitized = sanitizeJSONObject(session)
         sessionUpdateCount += 1
@@ -378,8 +470,55 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
         if let turn = sanitized["turn_detection"] {
             debugLog("session.update turn_detection=\(turn)")
         }
+        dbg("ChatRealtime", "session_update_cfg", fields: [
+            "caller": caller,
+            "server_vad": serverVadEnabled,
+            "has_input_transcription": sanitized["input_audio_transcription"] != nil,
+        ])
         sendEvent(["type": "session.update", "session": sanitized])
         sessionUpdateSent = true
+    }
+
+    private func sendInputAudioBufferCommit(reason: String) {
+        guard !useLocalSTTOnly else { return }
+        guard dataChannel != nil else { return }
+        // Never commit tiny buffers; OpenAI rejects them ("buffer too small").
+        let duration = currentSpeechDuration()
+        guard duration >= minValidSpeechDuration else {
+            dbg("ChatRealtime", "input_commit_skipped_short", fields: [
+                "reason": reason,
+                "duration_ms": Int(duration * 1000),
+            ])
+            return
+        }
+        dbg("ChatRealtime", "input_commit_send", fields: [
+            "reason": reason,
+            "response_in_progress": responseInProgress,
+            "output_audio_active": outputAudioActive,
+        ])
+        sendEvent(["type": "input_audio_buffer.commit"])
+    }
+
+    private func emitHintPleaseSpeakMore() {
+        emit(
+            eventType: "hint",
+            payload: ["message": .string("Please speak a bit more before I respond.")],
+            role: "system"
+        )
+        dbg("ChatRealtime", "short_speech_hint")
+    }
+
+    private func resetSpeechWindow() {
+        userSpeechStartedAt = nil
+        lastSpeechDuration = 0
+        lastSpeechWasValid = false
+    }
+
+    private func currentSpeechDuration() -> TimeInterval {
+        if let startedAt = userSpeechStartedAt {
+            return Date().timeIntervalSince(startedAt)
+        }
+        return 0
     }
 
     private func sendResponseCreate(reason: String) {
@@ -396,6 +535,104 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
         dbg("ChatRealtime", "response_create", fields: ["reason": reason])
     }
 
+    private func requestResponseCreate(reason: String) {
+        if responseInProgress {
+            pendingResponseCreateReason = reason
+            dbg("ChatRealtime", "response_create_queued", fields: ["reason": reason])
+            return
+        }
+        sendResponseCreate(reason: reason)
+    }
+
+    @discardableResult
+    private func flushPendingResponseCreateIfNeeded() -> Bool {
+        guard !responseInProgress, let reason = pendingResponseCreateReason else { return false }
+        pendingResponseCreateReason = nil
+        sendResponseCreate(reason: reason)
+        return true
+    }
+
+    private func armServerBargeInConfirmation() {
+        if awaitingServerBargeInConfirmation {
+            return
+        }
+        awaitingServerBargeInConfirmation = true
+        serverBargeInSpeechStartedAt = Date()
+        serverBargeInTranscriptBuffer = ""
+        userTranscriptBuffer = ""
+        didFinalizeInput = false
+        dbg("ChatRealtime", "barge_in_arm", fields: ["min_duration_s": serverBargeInMinSpeechDuration])
+    }
+
+    private func clearServerBargeInConfirmation() {
+        awaitingServerBargeInConfirmation = false
+        serverBargeInSpeechStartedAt = nil
+        serverBargeInTranscriptBuffer = ""
+    }
+
+    @discardableResult
+    private func maybeConfirmServerBargeIn(with transcriptDelta: String?) -> Bool {
+        guard awaitingServerBargeInConfirmation else { return false }
+        if let transcriptDelta, !transcriptDelta.isEmpty {
+            let incoming = transcriptDelta.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !incoming.isEmpty {
+                if serverBargeInTranscriptBuffer.isEmpty {
+                    serverBargeInTranscriptBuffer = incoming
+                } else if incoming.lowercased().contains(serverBargeInTranscriptBuffer.lowercased()) {
+                    serverBargeInTranscriptBuffer = incoming
+                } else if !serverBargeInTranscriptBuffer.lowercased().contains(incoming.lowercased()) {
+                    serverBargeInTranscriptBuffer += " " + incoming
+                }
+            }
+        }
+        guard let startedAt = serverBargeInSpeechStartedAt else {
+            clearServerBargeInConfirmation()
+            return false
+        }
+        let elapsed = Date().timeIntervalSince(startedAt)
+        guard elapsed >= serverBargeInMinSpeechDuration else {
+            return false
+        }
+
+        let buffered = serverBargeInTranscriptBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isUsableBargeInTranscript(buffered) else {
+            dbg("ChatRealtime", "barge_in_waiting_for_content", fields: [
+                "elapsed_ms": Int(elapsed * 1000),
+                "chars": buffered.count,
+            ])
+            return false
+        }
+        clearServerBargeInConfirmation()
+        interruptForBargeIn()
+        startTurnIfNeeded(inputMode: "voice")
+        didFinalizeInput = false
+        if !buffered.isEmpty {
+            userTranscriptBuffer = buffered
+            emit(eventType: "input_transcript.delta", payload: ["text": .string(buffered)], role: "user")
+            maybePrefetch(for: buffered)
+        }
+        dbg("ChatRealtime", "barge_in_confirmed", fields: ["elapsed_ms": Int(elapsed * 1000)])
+        return true
+    }
+
+    private func isUsableBargeInTranscript(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= serverBargeInMinTranscriptChars else { return false }
+        let alnumCount = trimmed.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count
+        return alnumCount >= serverBargeInMinTranscriptChars
+    }
+
+    private func ensureVoiceTurnForInputIfNeeded(reason: String) {
+        guard currentTurnID == nil else { return }
+        startTurnIfNeeded(inputMode: "voice")
+        didFinalizeInput = false
+        emit(
+            eventType: "state.change",
+            payload: ["from": .string("idle"), "to": .string("listening"), "reason": .string(reason)],
+            role: "system"
+        )
+    }
+
     private func handleIncomingEvent(_ obj: [String: Any]) {
         let type = obj["type"] as? String ?? ""
         let meta = eventMeta(obj: obj)
@@ -405,6 +642,23 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
             "item_id": meta.itemId ?? "-",
             "call_id": meta.callId ?? "-",
         ])
+        // High-signal instrumentation for missing user transcript pipeline.
+        if type == "input_audio_buffer.speech_started"
+            || type == "input_audio_buffer.speech_stopped"
+            || type == "input_audio_buffer.committed"
+            || type == "conversation.item.created"
+            || type == "conversation.item.input_audio_transcription.delta"
+            || type == "conversation.item.input_audio_transcription.completed"
+            || type == "conversation.item.input_audio_transcription.failed"
+            || type == "input_audio_transcript.delta"
+            || type == "input_audio_transcript.done"
+            || type == "input_audio_transcription.delta"
+            || type == "input_audio_transcription.done"
+            || type == "input_audio_transcription.completed"
+            || type == "error"
+        {
+            dbg("ChatRealtime", "signal", fields: ["type": type])
+        }
         if type == "session.created" || type == "session.updated" {
             lastSessionUpdateStatus = "ack"
             dbg("ChatRealtime", "session_update_ack", fields: ["type": type])
@@ -416,17 +670,35 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
 
         if type == "error", let err = obj["error"] as? [String: Any] {
             let message = (err["message"] as? String) ?? "Realtime error"
+            let code = (err["code"] as? String) ?? (err["type"] as? String) ?? "-"
             emit(eventType: "error", payload: ["message": .string(message)], role: "system")
             DispatchQueue.main.async {
                 DebugLogger.shared.lastSessionUpdateError = message
             }
             lastSessionUpdateStatus = "error"
-            dbg("ChatRealtime", "openai_error", message: message, fields: ["type": type])
+            dbg("ChatRealtime", "openai_error", message: message, fields: ["type": type, "code": code])
+        }
+
+        if type == "conversation.item.created" {
+            if let item = obj["item"] as? [String: Any] {
+                let role = (item["role"] as? String) ?? "-"
+                let itemType = (item["type"] as? String) ?? "-"
+                var contentTypes: [String] = []
+                if let content = item["content"] as? [[String: Any]] {
+                    contentTypes = content.compactMap { $0["type"] as? String }
+                }
+                dbg("ChatRealtime", "item_created", fields: [
+                    "role": role,
+                    "item_type": itemType,
+                    "content_types": contentTypes.joined(separator: ","),
+                ])
+            }
         }
 
         if type == "response.created" {
             ensureTurnForResponse(reason: "response.created")
             responseInProgress = true
+            assistantTextGateOpen = true
             lastResponseId = meta.responseId
             seenTextDeltaThisResponse = false
             seenAudioDeltaThisResponse = false
@@ -452,52 +724,107 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
             }
         }
 
-        if type == "input_audio_buffer.speech_started" {
-            if outputAudioActive {
-                sendEvent(["type": "response.cancel"])
-                assistantTextGateOpen = false
-                pendingAssistantText = ""
-                assistantTextBuffer = ""
-                emit(eventType: "turn.cancelled", payload: ["cancel_turn_id": .string(currentTurnID ?? "")], role: "system")
-                currentTurnID = nil
+        if !useLocalSTTOnly {
+            if type == "input_audio_buffer.speech_started" {
+                if outputAudioActive || responseInProgress {
+                    armServerBargeInConfirmation()
+                    return
+                }
+                clearServerBargeInConfirmation()
+                userSpeechStartedAt = Date()
+                lastSpeechDuration = 0
+                lastSpeechWasValid = false
+                startTurnIfNeeded(inputMode: "voice")
+                didFinalizeInput = false
+                emit(eventType: "state.change", payload: ["from": .string("idle"), "to": .string("listening"), "reason": .string("speech_started")], role: "system")
+                emit(eventType: "input_transcript.delta", payload: ["text": .string("")], role: "user")
             }
-            startTurnIfNeeded(inputMode: "voice")
-            didFinalizeInput = false
-            emit(eventType: "state.change", payload: ["from": .string("idle"), "to": .string("listening"), "reason": .string("speech_started")], role: "system")
-            emit(eventType: "input_transcript.delta", payload: ["text": .string("")], role: "user")
-        }
 
-        if let delta = extractUserTranscriptDelta(type: type, obj: obj) {
-            userTranscriptBuffer.append(delta)
-            emit(eventType: "input_transcript.delta", payload: ["text": .string(userTranscriptBuffer)], role: "user")
-            maybePrefetch(for: userTranscriptBuffer)
-            dbg("ChatRealtime", "input_delta", fields: ["len": delta.count, "total": userTranscriptBuffer.count])
-        }
+            if type == "input_audio_buffer.speech_stopped" {
+                let duration = currentSpeechDuration()
+                lastSpeechDuration = duration
+                lastSpeechWasValid = duration >= minValidSpeechDuration
+                dbg("ChatRealtime", "speech_window", fields: [
+                    "duration_ms": Int(duration * 1000),
+                    "valid": lastSpeechWasValid,
+                ])
 
-        if let final = extractUserTranscriptFinal(type: type, obj: obj, fallback: userTranscriptBuffer) {
-            if !didFinalizeInput {
-                didFinalizeInput = true
-                let transcript = final.trimmingCharacters(in: .whitespacesAndNewlines)
-                userTranscriptBuffer = ""
-                if !transcript.isEmpty {
-                    debugLog("input final len=\(transcript.count)")
-                    emit(eventType: "input_transcript.final", payload: ["text": .string(transcript)], role: "user")
-                    emit(eventType: "state.change", payload: ["from": .string("listening"), "to": .string("thinking"), "reason": .string("final_transcript")], role: "system")
-                    sendResponseCreate(reason: "voice_final")
-                    dbg("ChatRealtime", "input_final", fields: ["len": transcript.count])
+                // If the user spoke too briefly, do not commit, do not barge-in, and do not respond.
+                if !lastSpeechWasValid, duration > 0 {
+                    emitHintPleaseSpeakMore()
+                    userTranscriptBuffer = ""
+                    didFinalizeInput = true
+                    endTurnIfNeeded()
+                    resetSpeechWindow()
+                    return
                 }
             }
-        }
 
-        if type == "input_audio_buffer.speech_stopped", !didFinalizeInput {
-            let transcript = userTranscriptBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-            userTranscriptBuffer = ""
-            if !transcript.isEmpty {
-                didFinalizeInput = true
-                debugLog("speech_stopped final len=\(transcript.count)")
-                emit(eventType: "input_transcript.final", payload: ["text": .string(transcript)], role: "user")
-                emit(eventType: "state.change", payload: ["from": .string("listening"), "to": .string("thinking"), "reason": .string("speech_stopped")], role: "system")
-                sendResponseCreate(reason: "speech_stopped")
+            if type == "input_audio_buffer.committed" {
+                dbg("ChatRealtime", "input_commit_ack")
+                // We intentionally do NOT start a response here.
+                // We'll start only after we receive a final transcription for a valid speech window.
+            }
+
+            if let delta = extractUserTranscriptDelta(type: type, obj: obj) {
+                if awaitingServerBargeInConfirmation {
+                    _ = maybeConfirmServerBargeIn(with: delta)
+                    return
+                }
+                ensureVoiceTurnForInputIfNeeded(reason: "transcript_delta")
+                userTranscriptBuffer.append(delta)
+                emit(eventType: "input_transcript.delta", payload: ["text": .string(userTranscriptBuffer)], role: "user")
+                maybePrefetch(for: userTranscriptBuffer)
+                dbg("ChatRealtime", "input_delta", fields: ["len": delta.count, "total": userTranscriptBuffer.count])
+            }
+
+            let finalFallback = awaitingServerBargeInConfirmation ? serverBargeInTranscriptBuffer : userTranscriptBuffer
+            if let final = extractUserTranscriptFinal(type: type, obj: obj, fallback: finalFallback) {
+                if awaitingServerBargeInConfirmation {
+                    let confirmed = maybeConfirmServerBargeIn(with: final)
+                    if !confirmed {
+                        clearServerBargeInConfirmation()
+                        dbg("ChatRealtime", "barge_in_disarmed", fields: ["reason": "final_before_min_duration"])
+                        emitHintPleaseSpeakMore()
+                        return
+                    }
+                }
+                ensureVoiceTurnForInputIfNeeded(reason: "transcript_final")
+                if !didFinalizeInput {
+                    didFinalizeInput = true
+                    let finalTranscript = final.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let transcript = finalTranscript.isEmpty
+                        ? userTranscriptBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                        : finalTranscript
+                    userTranscriptBuffer = ""
+                    if !transcript.isEmpty {
+                        // Only accept transcription if the speech window is valid.
+                        let duration = lastSpeechDuration > 0 ? lastSpeechDuration : currentSpeechDuration()
+                        if duration < minValidSpeechDuration {
+                            emitHintPleaseSpeakMore()
+                            endTurnIfNeeded()
+                            resetSpeechWindow()
+                            return
+                        }
+                        debugLog("input final len=\(transcript.count)")
+                        emit(eventType: "input_transcript.final", payload: ["text": .string(transcript)], role: "user")
+                        emit(eventType: "state.change", payload: ["from": .string("listening"), "to": .string("thinking"), "reason": .string("final_transcript")], role: "system")
+                        sendResponseCreate(reason: "voice_final")
+                        dbg("ChatRealtime", "input_final", fields: ["len": transcript.count])
+                        resetSpeechWindow()
+                    }
+                }
+            }
+
+            if type == "input_audio_buffer.speech_stopped", !didFinalizeInput {
+                if awaitingServerBargeInConfirmation {
+                    clearServerBargeInConfirmation()
+                    dbg("ChatRealtime", "barge_in_disarmed", fields: ["reason": "speech_stopped_early"])
+                    emitHintPleaseSpeakMore()
+                    return
+                }
+                // Strict mode: do not respond without a final transcription.
+                // If transcription never arrives, the UI will remain listening/thinking until timeout logic is added.
             }
         }
 
@@ -505,6 +832,12 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
             let source = assistantDeltaSource(type: type, obj: obj)
             guard source != "unknown" else {
                 dbg("ChatRealtime", "assistant_delta_skipped", fields: ["reason": "unknown_source", "type": type])
+                return
+            }
+            if source == "audio_transcript",
+               isAssistantAudioTranscriptDoneEvent(type),
+               seenAudioDeltaThisResponse {
+                dbg("ChatRealtime", "assistant_delta_skipped", fields: ["reason": "audio_done_duplicate"])
                 return
             }
             if source == "audio_transcript" && seenTextDeltaThisResponse {
@@ -521,11 +854,7 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
                 }
                 lastAssistantDelta = delta
                 lastAssistantDeltaAt = Date()
-                if assistantTextGateOpen {
-                    emit(eventType: "assistant_text.delta", payload: ["text": .string(delta)], role: "assistant")
-                } else {
-                    pendingAssistantText.append(delta)
-                }
+                emit(eventType: "assistant_text.delta", payload: ["text": .string(delta)], role: "assistant")
                 dbg("ChatRealtime", "assistant_delta", fields: ["len": delta.count, "source": source])
             }
         }
@@ -533,13 +862,17 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
         if type == "response.output_text.done" || type == "response.done" || type == "response.completed" {
             finalizeAssistantText()
             responseInProgress = false
-            endTurnIfNeeded()
+            if !flushPendingResponseCreateIfNeeded() {
+                endTurnIfNeeded()
+            }
         }
 
         if type == "response.failed" || type == "response.canceled" || type == "response.stopped" {
             finalizeAssistantText()
             responseInProgress = false
-            endTurnIfNeeded()
+            if !flushPendingResponseCreateIfNeeded() {
+                endTurnIfNeeded()
+            }
         }
 
         handleToolEvents(type: type, obj: obj)
@@ -568,7 +901,10 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
         if type == "response.output_text.delta" || type == "response.text.delta" {
             return "output_text"
         }
-        if type.contains("audio_transcript") || type.contains("audio_transcription") {
+        if type == "response.content_part.added" || type == "response.content_part.delta" {
+            return "output_text"
+        }
+        if isAssistantAudioTranscriptEvent(type) {
             return "audio_transcript"
         }
         return "unknown"
@@ -578,11 +914,45 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
         if type == "response.output_text.delta" || type == "response.text.delta" {
             return obj["delta"] as? String
         }
-        if type == "response.output_audio_transcript.delta"
+        if type == "response.content_part.added" || type == "response.content_part.delta" {
+            return extractContentPartText(obj)
+        }
+        if isAssistantAudioTranscriptEvent(type) {
+            return extractTranscriptText(obj) ?? (obj["delta"] as? String) ?? (obj["transcript"] as? String)
+        }
+        return nil
+    }
+
+    private func isAssistantAudioTranscriptEvent(_ type: String) -> Bool {
+        type == "response.output_audio_transcript.delta"
+            || type == "response.output_audio_transcript.done"
             || type == "response.audio_transcript.delta"
-            || type == "response.output_audio_transcription.delta"
-            || type == "response.audio_transcription.delta" {
-            return obj["delta"] as? String
+            || type == "response.audio_transcript.done"
+    }
+
+    private func isAssistantAudioTranscriptDoneEvent(_ type: String) -> Bool {
+        type == "response.output_audio_transcript.done"
+            || type == "response.audio_transcript.done"
+    }
+
+    private func extractContentPartText(_ obj: [String: Any]) -> String? {
+        if let part = obj["part"] as? [String: Any] {
+            if let text = part["text"] as? String { return text }
+            if let delta = part["delta"] as? String { return delta }
+            if let content = part["content"] as? [[String: Any]] {
+                for entry in content {
+                    if let text = entry["text"] as? String { return text }
+                    if let delta = entry["delta"] as? String { return delta }
+                    if let transcript = entry["transcript"] as? String { return transcript }
+                }
+            }
+        }
+        if let content = obj["content"] as? [[String: Any]] {
+            for entry in content {
+                if let text = entry["text"] as? String { return text }
+                if let delta = entry["delta"] as? String { return delta }
+                if let transcript = entry["transcript"] as? String { return transcript }
+            }
         }
         return nil
     }
@@ -718,6 +1088,7 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
                 let msg = String(data: data, encoding: .utf8) ?? "Tool error"
                 debugLog("tool \(toolName) http_error=\(msg)")
                 sendToolOutput(callId: callId, output: "{\"error\":\"\(msg)\"}")
+                requestResponseCreate(reason: "tool_http_error")
                 return
             }
             let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -741,10 +1112,12 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
             let output = json?["output"] ?? json
             debugLog("tool \(toolName) ok")
             sendToolOutput(callId: callId, output: stringifyOutput(output))
+            requestResponseCreate(reason: "tool_output")
             emit(eventType: "tool_call.progress", payload: ["message": .string("\(toolName) complete"), "status": .string("done")], role: "assistant")
         } catch {
             debugLog("tool \(toolName) error=\(error.localizedDescription)")
             sendToolOutput(callId: callId, output: "{\"error\":\"\(error.localizedDescription)\"}")
+            requestResponseCreate(reason: "tool_error")
         }
     }
 
@@ -775,13 +1148,16 @@ final class ChatRealtimeSession: NSObject, ObservableObject {
             guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 let msg = String(data: data, encoding: .utf8) ?? "Tool confirm error"
                 sendToolOutput(callId: pending.callId, output: "{\"error\":\"\(msg)\"}")
+                requestResponseCreate(reason: "tool_confirm_http_error")
                 return
             }
             let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let output = json?["output"] ?? json
             sendToolOutput(callId: pending.callId, output: stringifyOutput(output))
+            requestResponseCreate(reason: "tool_confirmed")
         } catch {
             sendToolOutput(callId: pending.callId, output: "{\"error\":\"\(error.localizedDescription)\"}")
+            requestResponseCreate(reason: "tool_confirm_error")
         }
     }
 
@@ -1037,7 +1413,13 @@ extension ChatRealtimeSession: LKRTCDataChannelDelegate {
     func dataChannelDidChangeState(_ dataChannel: LKRTCDataChannel) {
         debugLog("dataChannel state=\(dataChannel.readyState.rawValue)")
         dbg("ChatRealtime", "data_channel_state", fields: ["state": dataChannel.readyState.rawValue])
-        if dataChannel.readyState != .open {
+        if dataChannel.readyState == .open {
+            // IMPORTANT: We create the data channel locally, so `peerConnection(_:didOpen:)`
+            // may never fire. Bootstrap session.update when the local channel becomes open.
+            sendSessionUpdate(caller: "dataChannel.state.open")
+            return
+        }
+        if dataChannel.readyState == .closed {
             DispatchQueue.main.async {
                 self.lastError = "Realtime data channel closed"
                 self.state = .error
